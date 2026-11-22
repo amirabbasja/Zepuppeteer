@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 import json
 from pathlib import Path
 import tempfile
@@ -98,6 +99,69 @@ class WorkflowRunnerTests(unittest.IsolatedAsyncioTestCase):
     def details(self, run_id=None):
         run_id = run_id or read_history(self.state.path)[0]["id"]
         return read_history(self.state.path, run_id=run_id)
+
+    async def test_colab_vpn_connects_before_browser_and_closes_after_browser(self):
+        events = []
+        connection = SimpleNamespace(proxy={"server": "http://127.0.0.1:1234",
+                                             "username": "test", "password": "password"})
+        async def run_on_vpn(operation):
+            return await operation
+        connection.run = run_on_vpn
+
+        @asynccontextmanager
+        async def connect(profile):
+            events.append("vpn connected")
+            try:
+                yield connection
+            finally:
+                self.contexts[0].close.assert_awaited_once()
+                events.append("vpn closed")
+
+        async def launch(**options):
+            self.assertEqual(events, ["vpn connected"])
+            self.assertEqual(options["proxy"], connection.proxy)
+            events.append("browser launched")
+            return self.contexts[0]
+
+        async def task(ctx):
+            self.assertIs(ctx.vpn, connection)
+            events.append("task")
+            return TaskResult()
+
+        self.launch.side_effect = launch
+        with patch("zepuppeteer.runner.colab_uses_vpn", return_value=True), \
+                patch("zepuppeteer.runner.connect_vpn", connect):
+            result = await self.execute([Step("open", "colab.open_notebook")],
+                                        {"colab.open_notebook": task}, profiles=self.profiles[:1])
+        self.assertEqual(result.status, "success")
+        self.assertEqual(events, ["vpn connected", "browser launched", "task", "vpn closed"])
+
+    async def test_vpn_failure_notifies_without_launching_browser_or_task(self):
+        @asynccontextmanager
+        async def connect(profile):
+            raise NeedsAttention("VPN has no heartbeat")
+            yield
+
+        task = AsyncMock()
+        with patch("zepuppeteer.runner.colab_uses_vpn", return_value=True), \
+                patch("zepuppeteer.runner.connect_vpn", connect):
+            result = await self.execute([Step("open", "colab.open_notebook")],
+                                        {"colab.open_notebook": task}, profiles=self.profiles[:1])
+        self.assertEqual(result.failed, 1)
+        self.launch.assert_not_awaited()
+        task.assert_not_awaited()
+        self.notifier.assert_awaited_once_with(self.profiles[0], "colab", "VPN has no heartbeat")
+
+    async def test_vpn_disabled_does_not_connect_or_configure_proxy(self):
+        task = AsyncMock(return_value=TaskResult())
+        with patch("zepuppeteer.runner.colab_uses_vpn", return_value=False), \
+                patch("zepuppeteer.runner.connect_vpn") as connect:
+            result = await self.execute([Step("open", "colab.open_notebook")],
+                                        {"colab.open_notebook": task}, profiles=self.profiles[:1])
+        self.assertEqual(result.status, "success")
+        connect.assert_not_called()
+        self.assertNotIn("proxy", self.launch.call_args.kwargs)
+        self.assertIsNone(task.call_args.args[0].vpn)
 
     async def test_pipeline_passes_outputs_and_opens_each_profile_only_once(self):
         seen = []
