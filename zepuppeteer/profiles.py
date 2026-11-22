@@ -11,14 +11,24 @@ from .profile_transfer import find_profile, read_state
 _NATIVE_DIRECTORY = re.compile(r"Default|Profile \d+")
 
 
-def _named_brave_profile(display_name: str) -> tuple[Path, str]:
+def _named_brave_profile(display_name: str, *, initialize: bool = False) -> tuple[Path, str]:
     root = (Path.home() / ".config/BraveSoftware/Brave-Browser").resolve()
+    if initialize and (root / "Local State").is_symlink():
+        raise ValueError(f"Brave browser state must not be symlinked: {root / 'Local State'}")
     try:
-        state = read_state(root)
+        state = {} if initialize and not (root / "Local State").exists() else read_state(root)
     except (OSError, ValueError) as error:
         raise ValueError(f"Cannot read installed Brave profiles in {root}: {error}") from error
-    directory = find_profile(state, display_name)
-    return root, _profile_directory(root, directory)
+    directory = find_profile(state, display_name, required=not initialize)
+    if directory is not None:
+        return root, _profile_directory(root, directory)
+    directory = "Default"
+    number = 0
+    cache = state.get("profile", {}).get("info_cache", {})
+    while directory in cache or (root / directory).exists() or (root / directory).is_symlink():
+        number += 1
+        directory = f"Profile {number}"
+    return root, directory
 
 
 def _profile_directory(root: Path, configured: str | None) -> str | None:
@@ -37,6 +47,49 @@ def _profile_directory(root: Path, configured: str | None) -> str | None:
     return directories[0] if directories else None
 
 
+def load_profile(entry: Path, *, native: bool = False, initialize: bool = False) -> Profile:
+    """Read one account, optionally planning browser data that setup will create."""
+    manifest = entry / "profile.toml"
+    if manifest.is_symlink():
+        raise ValueError(f"Profile configuration must not be symlinked: {manifest}")
+    metadata = read_toml(manifest) if manifest.exists() else {}
+    enabled, tags, settings = (metadata.get("enabled", True), metadata.get("tags", []),
+                               metadata.get("settings", {}))
+    if type(enabled) is not bool:
+        raise ValueError(f"enabled must be a boolean in {manifest}.")
+    if not isinstance(tags, list) or not all(isinstance(tag, str) and tag for tag in tags):
+        raise ValueError(f"tags must be an array of nonempty strings in {manifest}.")
+    if not isinstance(settings, dict):
+        raise ValueError(f"settings must be a table in {manifest}.")
+    browser_metadata = metadata.get("profile", {})
+    if not isinstance(browser_metadata, dict):
+        raise ValueError(f"profile must be a table in {manifest}.")
+    display_name = browser_metadata.get("brave_browser_displayName")
+    if display_name is not None:
+        if not isinstance(display_name, str) or not display_name.strip():
+            raise ValueError(f"profile.brave_browser_displayName must be a nonempty string in {manifest}.")
+        if metadata.get("profile_directory") is not None:
+            raise ValueError(f"Use either profile.brave_browser_displayName or profile_directory in {manifest}.")
+        data_root, browser_directory = _named_brave_profile(display_name, initialize=initialize)
+    elif native:
+        data_root, browser_directory = entry.parent, entry.name
+    else:
+        # Import/export already uses src/. Metadata marks a new managed profile.
+        managed = initialize or (entry / "src").exists() or manifest.exists()
+        if (entry / "src").is_symlink():
+            raise ValueError(f"Browser data directory must not be symlinked: {entry / 'src'}")
+        # Existing flat browser data remains usable even after adding metadata.
+        flat = (entry / "Local State").is_file() or (entry / "Default").is_dir()
+        if managed and flat and (entry / "src").exists():
+            raise ValueError(f"Ambiguous browser data: both {entry} and its src/ contain profile data.")
+        data_root = entry / "src" if managed and not flat else entry
+        if data_root.exists() and not data_root.is_dir():
+            raise ValueError(f"Browser data path is not a directory: {data_root}")
+        browser_directory = _profile_directory(data_root, metadata.get("profile_directory"))
+    return Profile(entry.name, data_root, browser_directory, enabled, tuple(tags), settings,
+                   display_name, manifest if initialize or manifest.exists() else None)
+
+
 def discover_profiles(directory: str | Path, layout: str = "auto") -> list[Profile]:
     if layout not in {"auto", "native", "isolated"}:
         raise ValueError("Invalid layout. Use auto, native, or isolated.")
@@ -53,45 +106,7 @@ def discover_profiles(directory: str | Path, layout: str = "auto") -> list[Profi
         (1, int(part)) if part.isdigit() else (0, part.casefold())
         for part in re.split(r"(\d+)", entry.name)
     ])
-    profiles = []
-    for entry in folders:
-        manifest = entry / "profile.toml"
-        metadata = read_toml(manifest) if manifest.exists() else {}
-        enabled, tags, settings = (metadata.get("enabled", True), metadata.get("tags", []),
-                                   metadata.get("settings", {}))
-        if type(enabled) is not bool:
-            raise ValueError(f"enabled must be a boolean in {manifest}.")
-        if not isinstance(tags, list) or not all(isinstance(tag, str) and tag for tag in tags):
-            raise ValueError(f"tags must be an array of nonempty strings in {manifest}.")
-        if not isinstance(settings, dict):
-            raise ValueError(f"settings must be a table in {manifest}.")
-        browser_metadata = metadata.get("profile", {})
-        if not isinstance(browser_metadata, dict):
-            raise ValueError(f"profile must be a table in {manifest}.")
-        display_name = browser_metadata.get("brave_browser_displayName")
-        if display_name is not None:
-            if not isinstance(display_name, str) or not display_name.strip():
-                raise ValueError(f"profile.brave_browser_displayName must be a nonempty string in {manifest}.")
-            if metadata.get("profile_directory") is not None:
-                raise ValueError(f"Use either profile.brave_browser_displayName or profile_directory in {manifest}.")
-            data_root, browser_directory = _named_brave_profile(display_name)
-        elif native:
-            data_root, browser_directory = root, entry.name
-        else:
-            # Import/export already uses src/. Metadata marks a new managed profile.
-            managed = (entry / "src").exists() or manifest.exists()
-            if (entry / "src").is_symlink():
-                raise ValueError(f"Browser data directory must not be symlinked: {entry / 'src'}")
-            # Existing flat browser data remains usable even after adding metadata.
-            flat = (entry / "Local State").is_file() or (entry / "Default").is_dir()
-            if managed and flat and (entry / "src").exists():
-                raise ValueError(f"Ambiguous browser data: both {entry} and its src/ contain profile data.")
-            data_root = entry / "src" if managed and not flat else entry
-            if data_root.exists() and not data_root.is_dir():
-                raise ValueError(f"Browser data path is not a directory: {data_root}")
-            browser_directory = _profile_directory(data_root, metadata.get("profile_directory"))
-        profiles.append(Profile(entry.name, data_root, browser_directory, enabled, tuple(tags), settings,
-                                display_name, manifest if manifest.exists() else None))
+    profiles = [load_profile(entry, native=native) for entry in folders]
     if not profiles:
         raise ValueError(f"No profiles found in {root}. Create a subdirectory for each profile first.")
     return profiles

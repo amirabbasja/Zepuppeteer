@@ -70,8 +70,8 @@ def parser() -> argparse.ArgumentParser:
     _selection_arguments(profiles)
     profiles.add_argument("--include-disabled", action="store_true")
     create = commands.add_parser("createProfile", aliases=["create-profile"],
-                                 help="Create a Brave profile and open it for manual login")
-    create.add_argument("profile_name", help="New profile directory name")
+                                 help="Initialize or reopen a Brave profile for manual login")
+    create.add_argument("profile_name", help="Profile directory name (existing configuration is preserved)")
     create.add_argument("--profiles-dir", default="./profiles")
     create.add_argument("--executable", help="Path or command name of the Brave executable")
     create.add_argument("--no-install", action="store_true", help="Fail instead of installing missing Brave")

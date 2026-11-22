@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from zepuppeteer.brave import find_brave, launch_options
 from zepuppeteer.cli import main
 from zepuppeteer.config import read_toml
+from zepuppeteer.profile_transfer import atomic_write
 from zepuppeteer.profiles import discover_profiles
 from zepuppeteer.tasks.createProfile import createProfile
 
@@ -47,19 +48,36 @@ class CreateProfileTests(unittest.IsolatedAsyncioTestCase):
                 await createProfile(name, profiles_dir=self.root, dry_run=True)
         self.assertFalse(self.root.exists())
 
-    async def test_existing_profile_and_symlink_are_never_overwritten(self):
+    async def test_existing_configuration_can_be_previewed_without_changes(self):
         folder = self.root / "existing"
         folder.mkdir(parents=True)
         manifest = folder / "profile.toml"
         original = b'enabled=false\n# Keep existing account settings\n'
         manifest.write_bytes(original)
-        (self.root / "linked").symlink_to(folder, target_is_directory=True)
-        (self.root / "dangling").symlink_to(self.root / "missing", target_is_directory=True)
-        for name in ("existing", "linked", "dangling"):
-            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "already exists"):
-                await createProfile(name, profiles_dir=self.root, dry_run=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = await createProfile("existing", profiles_dir=self.root, dry_run=True)
+        self.assertEqual(result.outputs["user_data_dir"], str(folder / "src"))
         self.assertEqual(manifest.read_bytes(), original)
         self.assertEqual(list(folder.iterdir()), [manifest])
+
+    async def test_symlinked_and_non_directory_profile_paths_are_rejected(self):
+        folder = self.root / "existing"
+        folder.mkdir(parents=True)
+        (self.root / "linked").symlink_to(folder, target_is_directory=True)
+        (self.root / "dangling").symlink_to(self.root / "missing", target_is_directory=True)
+        for name in ("linked", "dangling"):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "symlinked"):
+                await createProfile(name, profiles_dir=self.root, dry_run=True)
+        (self.root / "file").write_text("keep")
+        with self.assertRaisesRegex(ValueError, "Not a profile directory"):
+            await createProfile("file", profiles_dir=self.root, dry_run=True)
+        (folder / "src").symlink_to(self.root / "missing", target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "symlinked"):
+            await createProfile("existing", profiles_dir=self.root, dry_run=True)
+        (folder / "src").unlink()
+        (folder / "profile.toml").symlink_to(self.root / "file")
+        with self.assertRaisesRegex(ValueError, "symlinked"):
+            await createProfile("existing", profiles_dir=self.root, dry_run=True)
 
     async def test_native_brave_root_is_rejected_before_creation(self):
         self.root.mkdir()
@@ -133,6 +151,184 @@ class CreateProfileTests(unittest.IsolatedAsyncioTestCase):
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
 
+    async def finish_setup(self, name):
+        async with self.session() as (handlers, launch):
+            task = asyncio.create_task(createProfile(name, profiles_dir=self.root))
+            try:
+                await asyncio.wait_for(self.opened.wait(), timeout=3)
+                handlers["close"]()
+                result = await asyncio.wait_for(task, timeout=3)
+                return result, launch.call_args.kwargs
+            finally:
+                if not task.done():
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+
+    async def test_initializes_existing_account_and_preserves_all_configuration(self):
+        folder = self.root / "acc-5"
+        folder.mkdir(parents=True)
+        manifest = folder / "profile.toml"
+        original = (b'# Account entered before browser setup\nenabled = false\ntags = ["test"]\n'
+                    b'[settings]\ntimezone = "Asia/Tehran"\n'
+                    b'[profile.platforms.colab]\nlogin_username = "private@example.test"\n')
+        manifest.write_bytes(original)
+        # Setup for one account must not try to resolve other unfinished accounts.
+        other = self.root / "unfinished"
+        other.mkdir()
+        (other / "profile.toml").write_text('[profile]\nbrave_browser_displayName="Missing"\n')
+        result, options = await self.finish_setup("acc-5")
+        self.assertEqual(manifest.read_bytes(), original)
+        self.assertTrue((folder / "src").is_dir())
+        self.assertEqual(options["user_data_dir"], str(folder / "src"))
+        self.assertEqual(result.outputs["manifest_path"], str(manifest))
+
+    async def test_reopens_existing_browser_data_without_replacing_it(self):
+        folder = self.root / "acc-5"
+        browser = folder / "src/Profile 2"
+        browser.mkdir(parents=True)
+        cookies = browser / "Cookies"
+        cookies.write_bytes(b"existing saved session")
+        manifest = folder / "profile.toml"
+        original = b'profile_directory="Profile 2"\n[settings]\nvalue="keep"\n'
+        manifest.write_bytes(original)
+        for _ in range(2):
+            _, options = await self.finish_setup("acc-5")
+            self.assertEqual(options["user_data_dir"], str(folder / "src"))
+            self.assertIn("--profile-directory=Profile 2", options["args"])
+            self.assertEqual(cookies.read_bytes(), b"existing saved session")
+            self.assertEqual(manifest.read_bytes(), original)
+
+    async def test_empty_account_folder_uses_managed_src(self):
+        folder = self.root / "acc-5"
+        folder.mkdir(parents=True)
+        _, options = await self.finish_setup("acc-5")
+        self.assertTrue((folder / "profile.toml").is_file())
+        self.assertEqual(options["user_data_dir"], str(folder / "src"))
+        self.assertEqual(discover_profiles(self.root)[0].user_data_dir, folder / "src")
+
+    async def test_invalid_configuration_is_rejected_before_any_setup(self):
+        folder = self.root / "acc-5"
+        folder.mkdir(parents=True)
+        manifest = folder / "profile.toml"
+        for contents in ('enabled="false"', '[profile]\nbrave_browser_displayName=""', 'broken=['):
+            manifest.write_text(contents)
+            with self.subTest(contents=contents), patch(f"{MODULE}.find_brave") as finder:
+                with self.assertRaises(ValueError):
+                    await createProfile("acc-5", profiles_dir=self.root)
+                finder.assert_not_called()
+                self.assertEqual(manifest.read_text(), contents)
+                self.assertFalse((folder / "src").exists())
+
+    def named_account(self):
+        folder = self.root / "acc-5"
+        folder.mkdir(parents=True)
+        (folder / "profile.toml").write_text('[profile]\nbrave_browser_displayName="AI-acc5"\n')
+        home = self.root.parent / "home"
+        return folder, home, home / ".config/BraveSoftware/Brave-Browser"
+
+    async def test_named_profile_dry_run_does_not_create_browser_data(self):
+        folder, home, brave = self.named_account()
+        output = io.StringIO()
+        with patch("zepuppeteer.profiles.Path.home", return_value=home), \
+                contextlib.redirect_stdout(output):
+            result = await createProfile("acc-5", profiles_dir=self.root, dry_run=True)
+        self.assertEqual(result.outputs["user_data_dir"], str(brave))
+        self.assertEqual(result.outputs["profile_directory"], "Default")
+        self.assertEqual(result.outputs["browser_display_name"], "AI-acc5")
+        self.assertFalse(home.exists())
+        self.assertFalse((folder / "src").exists())
+
+    async def test_creates_named_profile_and_reuses_it_on_subsequent_setup(self):
+        folder, home, brave = self.named_account()
+        manifest = folder / "profile.toml"
+        original = manifest.read_bytes()
+        with patch("zepuppeteer.profiles.Path.home", return_value=home):
+            _, options = await self.finish_setup("acc-5")
+            self.assertEqual(options["user_data_dir"], str(brave))
+            self.assertIn("--profile-directory=Default", options["args"])
+            profile, = discover_profiles(self.root)
+            self.assertEqual(profile.browser_display_name, "AI-acc5")
+            self.assertEqual(profile.profile_directory, "Default")
+            cookies = brave / "Default/Cookies"
+            cookies.write_bytes(b"saved login")
+            await self.finish_setup("acc-5")
+            self.assertEqual(cookies.read_bytes(), b"saved login")
+        state = json.loads((brave / "Local State").read_text())
+        self.assertEqual(state["profile"]["info_cache"]["Default"]["name"], "AI-acc5")
+        self.assertEqual(json.loads((brave / "Default/Preferences").read_text())["profile"]["name"], "AI-acc5")
+        self.assertEqual(manifest.read_bytes(), original)
+        self.assertFalse((folder / "src").exists())
+
+    async def test_named_setup_preserves_other_profiles_and_avoids_directory_collisions(self):
+        folder, home, brave = self.named_account()
+        (brave / "Default").mkdir(parents=True)
+        cookies = brave / "Default/Cookies"
+        cookies.write_bytes(b"personal session")
+        (brave / "Profile 2").mkdir()
+        state = {"profile": {"info_cache": {"Default": {"name": "Personal"},
+                                            "Profile 1": {"name": "Other"}},
+                             "last_used": "Default"}, "other_settings": {"keep": True}}
+        (brave / "Local State").write_text(json.dumps(state))
+        with patch("zepuppeteer.profiles.Path.home", return_value=home):
+            _, options = await self.finish_setup("acc-5")
+            self.assertIn("--profile-directory=Profile 3", options["args"])
+            self.assertEqual(discover_profiles(self.root)[0].profile_directory, "Profile 3")
+        updated = json.loads((brave / "Local State").read_text())
+        new_entry = updated["profile"]["info_cache"].pop("Profile 3")
+        self.assertEqual(new_entry["name"], "AI-acc5")
+        self.assertEqual(updated, state)
+        self.assertEqual(cookies.read_bytes(), b"personal session")
+        self.assertFalse((folder / "src").exists())
+
+    async def test_named_setup_rejects_open_browser_without_registering_profile(self):
+        _, home, brave = self.named_account()
+        with patch("zepuppeteer.profiles.Path.home", return_value=home):
+            async with self.session():
+                with patch(f"{MODULE}.ensure_closed", side_effect=RuntimeError("Brave is running")), \
+                        self.assertRaisesRegex(RuntimeError, "Brave is running"):
+                    await createProfile("acc-5", profiles_dir=self.root)
+        self.assertFalse(brave.exists())
+
+    async def test_failed_named_registration_preserves_state_and_can_be_retried(self):
+        _, home, brave = self.named_account()
+        (brave / "Default").mkdir(parents=True)
+        state_path = brave / "Local State"
+        original = b'{"profile":{"info_cache":{"Default":{"name":"Personal"}}},"keep":true}'
+        state_path.write_bytes(original)
+
+        def fail_registration(path, data):
+            if path == state_path:
+                raise OSError("Cannot save browser metadata")
+            atomic_write(path, data)
+
+        with patch("zepuppeteer.profiles.Path.home", return_value=home):
+            async with self.session():
+                with patch(f"{MODULE}.atomic_write", side_effect=fail_registration), \
+                        self.assertRaisesRegex(OSError, "Cannot save browser metadata"):
+                    await createProfile("acc-5", profiles_dir=self.root)
+            self.assertEqual(state_path.read_bytes(), original)
+            self.assertFalse((brave / "Profile 1").exists())
+            _, options = await self.finish_setup("acc-5")
+            self.assertIn("--profile-directory=Profile 1", options["args"])
+
+    async def test_named_setup_rejects_duplicate_names_and_symlinked_state(self):
+        _, home, brave = self.named_account()
+        brave.mkdir(parents=True)
+        state_path = brave / "Local State"
+        original = json.dumps({"profile": {"info_cache": {"Default": {"name": "AI-acc5"},
+                                                        "Profile 1": {"name": "AI-acc5"}}}})
+        state_path.write_text(original)
+        with patch("zepuppeteer.profiles.Path.home", return_value=home):
+            with self.assertRaisesRegex(ValueError, "Multiple Brave profiles"):
+                await createProfile("acc-5", profiles_dir=self.root, dry_run=True)
+            self.assertEqual(state_path.read_text(), original)
+            state_path.rename(brave / "saved-state")
+            state_path.symlink_to(brave / "saved-state")
+            with self.assertRaisesRegex(ValueError, "symlinked"):
+                await createProfile("acc-5", profiles_dir=self.root, dry_run=True)
+            self.assertEqual((brave / "saved-state").read_text(), original)
+
     async def test_cancellation_closes_browser_and_keeps_created_profile(self):
         async with self.session():
             task = asyncio.create_task(createProfile("new", profiles_dir=self.root))
@@ -149,6 +345,7 @@ class CreateProfileTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "Browser failed"):
                 await createProfile("new", profiles_dir=self.root)
         self.assertEqual(discover_profiles(self.root)[0].name, "new")
+        await self.finish_setup("new")
 
 
 class CreateProfileCliTests(unittest.TestCase):
@@ -164,10 +361,23 @@ class CreateProfileCliTests(unittest.TestCase):
 @unittest.skipUnless(BRAVE and importlib.util.find_spec("playwright"), "Requires Brave and Playwright")
 class CreateProfileBrowserTests(unittest.IsolatedAsyncioTestCase):
     async def test_saved_cookie_and_local_storage_survive_setup_and_workflow_reopen(self):
+        await self.check_saved_session()
+
+    async def test_existing_account_retains_configuration_and_browser_session(self):
+        await self.check_saved_session('enabled=false\n[profile.platforms.colab]\nlogin_username="account@example.test"\n')
+
+    async def test_named_profile_retains_display_name_and_browser_session(self):
+        await self.check_saved_session('[profile]\nbrave_browser_displayName="AI-acc5"\n')
+
+    async def check_saved_session(self, metadata=None):
         from playwright.async_api import async_playwright
 
         with tempfile.TemporaryDirectory(prefix="zepuppeteer-create-browser-") as temporary:
             root = Path(temporary) / "profiles"
+            manifest = root / "new/profile.toml"
+            if metadata is not None:
+                manifest.parent.mkdir(parents=True)
+                manifest.write_text(metadata)
             async with async_playwright() as playwright:
                 async def respond(route):
                     await route.fulfill(body="<title>Local login fixture</title>", content_type="text/html")
@@ -188,9 +398,16 @@ class CreateProfileBrowserTests(unittest.IsolatedAsyncioTestCase):
                     await run_profiles(_playwright, profiles, executable, task=login, headless=True)
 
                 with patch(f"{MODULE}.run_profiles", side_effect=login_session), \
+                        patch("zepuppeteer.profiles.Path.home", return_value=Path(temporary) / "home"), \
                         patch.dict(os.environ, {"DISPLAY": ":0"}), contextlib.redirect_stdout(io.StringIO()):
                     await createProfile("new", profiles_dir=root, executable=BRAVE, no_install=True)
-                profile, = discover_profiles(root)
+                    profile, = discover_profiles(root)
+                if metadata is not None:
+                    self.assertEqual(manifest.read_text(), metadata)
+                if profile.browser_display_name:
+                    self.assertEqual(profile.browser_display_name, "AI-acc5")
+                    preferences = profile.user_data_dir / profile.profile_directory / "Preferences"
+                    self.assertEqual(json.loads(preferences.read_text())["profile"]["name"], "AI-acc5")
                 browser = await playwright.chromium.launch_persistent_context(**launch_options(BRAVE, profile, True))
                 try:
                     cookies = await browser.cookies("https://login.example.test/")
