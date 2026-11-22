@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from ...config import read_toml
 from ...models import NeedsAttention, TaskContext, TaskResult
+from ...vpn import uses_vpn
 from ...websites.colab import ColabSite, DEFAULT_NOTEBOOK_URL, validate_notebook_url
 
 
@@ -453,6 +454,14 @@ async def run(ctx: TaskContext) -> TaskResult:
         raise ValueError("Colab platform data must be a TOML table.")
     
     colabData = colabData or {}
+    if uses_vpn(colabData):
+        if ctx.vpn is None or ctx.vpn.profile_name != ctx.profile.name:
+            raise NeedsAttention(
+                f"Profile '{ctx.profile.name}': VPN is not connected. "
+                "Run the Colab workflow so its VPN is connected before Brave starts."
+            )
+        await ctx.vpn.heartbeat()
+
     expected_email = colabData.get("login_username")
     if colabData and (not isinstance(expected_email, str) or not expected_email.strip()):
         raise ValueError("Colab platform data requires email or login_username for the login check.")
@@ -563,6 +572,8 @@ async def run(ctx: TaskContext) -> TaskResult:
     print_state(ctx.profile.name, f"Colab runtime is connected.", verbose = verbose)
 
     # click the "run all" button and wait for the main job to start
+    if uses_vpn(colabData):
+        await ctx.vpn.heartbeat()
     last_cell_id = await ColabSite(page).run_all_and_wait_for_last_cell(
         timeout_seconds=colabData.get("job_start_timeout_seconds", 300),
     )

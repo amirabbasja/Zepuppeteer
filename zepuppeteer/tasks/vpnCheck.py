@@ -94,15 +94,15 @@ async def _command(command, *, label, timeout=10, input=None, check=True, redact
     return process.returncode, output.decode("utf-8", errors="replace")
 
 
-async def _wireguard_privileges():
+async def _wireguard_privileges(*, interactive=True):
     if os.geteuid() == 0:
         return []
     sudo = _required("sudo")
     code, _ = await _command([sudo, "-n", "-v"], label="Check WireGuard sudo authorization", check=False)
     if code:
-        if not sys.stdin.isatty():
+        if not interactive or not sys.stdin.isatty():
             raise RuntimeError("WireGuard needs sudo authorization. Run 'sudo -v' in the same terminal, "
-                               "then retry vpnCheck. Unattended runs need sudo authorization configured in advance.")
+                               "then retry the VPN task. Unattended runs need sudo authorization configured in advance.")
         print("WireGuard needs administrator privileges to create its temporary network namespace. "
               "Authenticate at the sudo prompt:", flush=True)
         # Inherit the terminal so sudo handles the password itself. Never pipe,
@@ -231,10 +231,12 @@ def _outbound(link):
         raise ValueError("Invalid or unsupported v2ray_link. Use a supported share link and transport; TLS verification is required.") from None
 
 
-async def _probe(curl, url, timeout, *, prefix=(), proxy=None):
+async def _probe(curl, url, timeout, *, prefix=(), proxy=None, interface=None):
     command = [*prefix, curl, "--disable", "--silent", "--fail", "--output", os.devnull,
                "--max-time", str(timeout), "--connect-timeout", str(timeout),
                "--proto", "=https", "--write-out", "%{time_total}"]
+    if interface is not None:
+        command += ["--interface", interface]
     # --disable ignores ~/.curlrc; explicit proxy settings prevent environment bypass.
     if proxy:
         address, credentials = proxy

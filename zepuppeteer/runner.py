@@ -1,6 +1,7 @@
 """Own browser lifecycle and execute sequential workflows with bounded attempts."""
 
 import asyncio
+from contextlib import AsyncExitStack
 from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
@@ -14,6 +15,7 @@ from .brave import hide_webdriver, launch_options, prepare_profile_for_launch
 from .config import json_text
 from .models import NeedsAttention, RunSummary, TaskContext, TaskResult
 from .notifications import notify_attention
+from .vpn import colab_uses_vpn, connect_vpn
 
 
 async def run_profiles(playwright, profiles, executable, task=None, headless=False):
@@ -79,7 +81,7 @@ async def _stop_trace(browser, started: bool, path: Path | None = None) -> None:
             print(f"Could not finish browser trace: {error}", file=sys.stderr, flush=True)
 
 
-async def _steps(browser, profile, workflow, tasks, state, run_id, directory, trace) -> str | None:
+async def _steps(browser, profile, workflow, tasks, state, run_id, directory, trace, vpn=None) -> str | None:
     results = {}
     for step in workflow.steps:
         if step.input_from and results[step.input_from].status != "success":
@@ -103,8 +105,11 @@ async def _steps(browser, profile, workflow, tasks, state, run_id, directory, tr
                 # A task cannot mutate the next profile's params or an earlier result.
                 inputs = results[step.input_from].outputs if step.input_from else {}
                 ctx = TaskContext(browser, profile, json.loads(json_text(step.params)),
-                                  json.loads(json_text(inputs)), attempt_dir, run_id, step.id)
-                result = await asyncio.wait_for(tasks[step.task](ctx), timeout=step.timeout_seconds)
+                                  json.loads(json_text(inputs)), attempt_dir, run_id, step.id, vpn=vpn)
+                operation = tasks[step.task](ctx)
+                if vpn is not None:
+                    operation = vpn.run(operation)
+                result = await asyncio.wait_for(operation, timeout=step.timeout_seconds)
                 if not isinstance(result, TaskResult):
                     raise TypeError(f"Task {step.task} must return TaskResult, got {type(result).__name__}.")
                 if result.status not in ("success", "skipped") or not isinstance(result.message, str):
@@ -144,15 +149,22 @@ async def _steps(browser, profile, workflow, tasks, state, run_id, directory, tr
 async def _profile(playwright, profile, executable, workflow, tasks, state, run_id,
                    directory, headless, trace) -> str:
     browser, status, error = None, "success", None
+    resources, vpn = AsyncExitStack(), None
     state.start_profile(run_id, profile.name)
     print(f"Opening profile: {profile.name}", flush=True)
     try:
         directory.mkdir(parents=True)
+        if any(step.task == "colab.open_notebook" for step in workflow.steps) and colab_uses_vpn(profile):
+            vpn = await resources.enter_async_context(connect_vpn(profile))
         prepare_profile_for_launch(profile)
+        options = launch_options(executable, profile, headless)
+        if vpn is not None and vpn.proxy is not None:
+            options["proxy"] = vpn.proxy
+            options["args"] += ["--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"]
         browser = await playwright.chromium.launch_persistent_context(
-            **launch_options(executable, profile, headless))
+            **options)
         await hide_webdriver(browser)
-        error = await _steps(browser, profile, workflow, tasks, state, run_id, directory, trace)
+        error = await _steps(browser, profile, workflow, tasks, state, run_id, directory, trace, vpn=vpn)
         if error:
             status = "failed"
     except asyncio.CancelledError:
@@ -162,11 +174,19 @@ async def _profile(playwright, profile, executable, workflow, tasks, state, run_
     except Exception as failure:
         status, error = "failed", _error_text(failure)
         state.fail_running(run_id, profile.name, error)
+        if isinstance(failure, NeedsAttention):
+            await notify_attention(profile, "colab", str(failure))
         await _evidence(browser, directory, error)
     finally:
         cancelled_during_close = False
-        if browser is not None:
-            cleanup = asyncio.create_task(browser.close())
+        if browser is not None or vpn is not None:
+            async def close_resources():
+                try:
+                    if browser is not None:
+                        await browser.close()
+                finally:
+                    await resources.aclose()
+            cleanup = asyncio.create_task(close_resources())
             try:
                 await asyncio.shield(cleanup)
             except asyncio.CancelledError:

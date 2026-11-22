@@ -6,6 +6,7 @@ from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from playwright.async_api import BrowserContext
+    from .vpn import VPNConnection
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class TaskContext:
     artifact_dir: Path
     run_id: str
     step_id: str
+    vpn: "VPNConnection | None" = None
 
 
 @dataclass(frozen=True)

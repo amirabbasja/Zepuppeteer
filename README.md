@@ -399,6 +399,28 @@ from `zepuppeteer.tasks.createProfile` returns a `TaskResult` with the profile I
 manifest path, and browser data directory after the browser closes. Profile
 creation is a standalone setup task, performed before running workflows.
 
+To open an existing account for manual work, run:
+
+```bash
+python -m zepuppeteer openProfile acc-5
+# Preview the selected browser profile without opening Brave:
+python -m zepuppeteer openProfile acc-5 --dry-run
+```
+
+`openProfile` opens only the selected account in visible Brave and waits without
+a timeout until you close the browser manually. Cookies and saved logins are
+retained. It uses the existing `profile.toml`, including
+`profile.brave_browser_displayName` or `profile_directory`, and allows disabled
+accounts for manual work. Close any Brave instance using the same browser data
+before running it. The command requires a desktop display.
+
+`open-profile` is an alias. Use `--profiles-dir PATH`, `--executable PATH`, or
+`--no-install` as needed. It requires an existing account folder and does not
+create profile metadata or register missing named Brave profiles; use
+`createProfile` for initial setup. For Python callers,
+`await openProfile("acc-5", profiles_dir="./profiles")` from
+`zepuppeteer.tasks.openProfile` returns a `TaskResult` after manual closure.
+
 An empty `src/` is initialized by Brave on first execution. A profile metadata
 file can also designate a new managed profile before `src/` exists. Folder names
 are stable identifiers: `account-1` remains the profile's ID even if its browser
@@ -601,8 +623,51 @@ login_username = "account@example.com"
 notebook_url = "https://colab.research.google.com/drive/YOUR_NOTEBOOK_ID"
 notebook_name = "your-notebook.ipynb"
 auto_connect = true
+use_vpn = true
 job_start_timeout_seconds = 300
 ```
+
+With `use_vpn = true`, the runner connects the account's `profile.vpn` before
+launching Brave, and the task requires a live VPN before opening its notebook.
+WireGuard uses `wireguard_file` (relative to `profile.toml` or absolute); V2Ray
+uses `v2ray_link`. Both run an authenticated Xray HTTP proxy on an ephemeral
+`127.0.0.1` port that only the launched Brave profile uses. The connection stays
+alive until the browser closes.
+Omitting `use_vpn`, or setting it to `false`, leaves VPN setup disabled.
+
+Colab VPN connections require `xray` and `curl` on PATH for either protocol.
+Install a current Xray release using the official
+[Xray installation instructions](https://github.com/XTLS/Xray-install), and check
+that `xray version` works before running the workflow. The workflow does not
+install VPN tools automatically.
+
+For WireGuard, Xray reads the existing connection file's keys, addresses, MTU,
+AllowedIPs and peer settings into its userspace
+[WireGuard outbound](https://xtls.github.io/en/config/outbounds/wireguard.html).
+It explicitly sets `noKernelTun = true`, so the browser connection needs no
+`wg-quick`, kernel WireGuard interface, or sudo authorization. Host routes and
+`/etc/resolv.conf` stay unchanged, keeping Codespaces, GNOME and other
+applications on their existing network connection. Configured DNS server IPs
+become Xray's `remoteDNS` for website lookups through the tunnel; when absent,
+the workflow uses `1.1.1.1` and `1.0.0.1` through the tunnel. The source connection
+file is preserved, and shell hooks, `Table`, `ListenPort`, `FwMark` and
+`SaveConfig` are ignored.
+
+The proxy has no direct outbound fallback. Brave disables QUIC and restricts
+non-proxied WebRTC UDP because its HTTP proxy carries TCP traffic. Xray validates
+the generated configuration before launch. Temporary configuration files have
+mode 600, contain the VPN keys and proxy credentials, and are removed with the
+proxy process on completion, failure or cancellation. Startup diagnostics redact
+VPN keys and proxy credentials. The standalone WireGuard `vpnCheck` command
+below uses a separate namespace implementation and has different dependencies.
+
+An HTTPS heartbeat must succeed through the VPN before launch and before Run all.
+While a task runs, the runner repeats the heartbeat every 15 seconds and cancels
+the task with `NeedsAttention` if it fails or the proxy process exits. The
+heartbeat goes through the same authenticated proxy as Brave. A missing
+connection, heartbeat, or required VPN setup raises
+`NeedsAttention` and uses the normal attention notification path. Calling the
+Colab task directly with `use_vpn = true` requires the runner-provided VPN session.
 
 `notebook_name` must match the title exactly, excluding the trailing ` - Colab`.
 Use `notebook_url`, not the older `worker_url` key. The current implementation

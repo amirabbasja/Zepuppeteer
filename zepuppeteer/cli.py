@@ -76,6 +76,13 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--executable", help="Path or command name of the Brave executable")
     create.add_argument("--no-install", action="store_true", help="Fail instead of installing missing Brave")
     create.add_argument("--dry-run", action="store_true", help="Preview without creating files or opening Brave")
+    open_profile = commands.add_parser("openProfile", aliases=["open-profile"],
+                                       help="Open an existing Brave profile until you close it manually")
+    open_profile.add_argument("profile_name", help="Existing profile directory name")
+    open_profile.add_argument("--profiles-dir", default="./profiles")
+    open_profile.add_argument("--executable", help="Path or command name of the Brave executable")
+    open_profile.add_argument("--no-install", action="store_true", help="Fail instead of installing missing Brave")
+    open_profile.add_argument("--dry-run", action="store_true", help="Preview without opening Brave")
     vpn = commands.add_parser("vpnCheck", help="Check one profile's VPN without opening Brave")
     vpn.add_argument("profile_name", help="Profile directory name")
     vpn.add_argument("--profiles-dir", default="./profiles")
@@ -111,6 +118,11 @@ async def run(args) -> None:
         from .tasks.createProfile import createProfile
         await createProfile(args.profile_name, profiles_dir=args.profiles_dir, executable=args.executable,
                             no_install=args.no_install, dry_run=args.dry_run)
+        return
+    if command in {"openProfile", "open-profile"}:
+        from .tasks.openProfile import openProfile
+        await openProfile(args.profile_name, profiles_dir=args.profiles_dir, executable=args.executable,
+                          no_install=args.no_install, dry_run=args.dry_run)
         return
     if command == "vpnCheck":
         from .tasks.vpnCheck import vpnCheck
