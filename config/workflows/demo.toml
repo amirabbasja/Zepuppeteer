@@ -1,0 +1,14 @@
+name = "demo"
+on_profile_failure = "continue"
+
+[[steps]]
+task = "demo.fill_form"
+timeout_seconds = 30
+
+[steps.params]
+prefix = "Hello "
+
+[[steps]]
+task = "demo.verify_result"
+input_from = "demo.fill_form"
+timeout_seconds = 10

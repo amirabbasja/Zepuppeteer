@@ -1,0 +1,10 @@
+name = "colab"
+on_profile_failure = "continue"
+
+[[steps]]
+task = "colab.open_notebook"
+timeout_seconds = 900
+retries = 0
+
+# The target comes from profile.platforms.colab.notebook_url in profile.toml.
+# The budget includes runtime connection and waiting for the last code cell to start.

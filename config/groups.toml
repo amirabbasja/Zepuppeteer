@@ -1,0 +1,3 @@
+# Profile directory names are stable identifiers. "all" is built in.
+[groups]
+demo = ["account-1", "account-2"]

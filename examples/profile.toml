@@ -1,0 +1,20 @@
+# Copy to profiles/<account>/profile.toml; create src/ alongside it.
+enabled = true
+tags = ["reports", "team-a"]
+# If src/ contains multiple browser profiles, select one explicitly:
+# profile_directory = "Profile 1"
+
+[settings]
+timezone = "Asia/Tehran"
+
+[settings.portal_a]
+base_url = "https://example.com"
+
+[settings.colab]
+notebook_url = "https://colab.research.google.com/notebooks/intro.ipynb"
+
+# Uncomment to enable the Kaggle workflow for this profile:
+# [profile.platforms.kaggle]
+# login_username = "your-kaggle-username"
+# notebook_url = "https://www.kaggle.com/code/your-kaggle-username/your-notebook/edit"
+# notebook_name = "Your Notebook"

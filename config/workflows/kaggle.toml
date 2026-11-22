@@ -1,0 +1,10 @@
+name = "kaggle"
+on_profile_failure = "continue"
+
+[[steps]]
+task = "kaggle.open_notebook"
+timeout_seconds = 120
+retries = 0
+
+# Each profile supplies login_username, notebook_url, and notebook_name in its
+# [profile.platforms.kaggle] table. login_username is the Kaggle handle, not email.

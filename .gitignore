@@ -1,0 +1,11 @@
+profiles/
+__pycache__/
+.venv/
+*.egg-info/
+build/
+dist/
+data/
+artifacts/
+.env
+.env.*
+!.env.example
