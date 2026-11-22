@@ -339,7 +339,8 @@ uv.lock                        # Resolved dependency versions
 ```
 
 `profiles/`, `data/`, and `artifacts/` are runtime directories, created as needed.
-The repository does not create or edit your real profile metadata during setup.
+Create profile metadata explicitly with `createProfile` or by copying the example
+TOML; installing the project leaves existing profile metadata untouched.
 Configuration files and examples live in this checkout; when running from another
 working directory, supply the appropriate directory/path flags.
 
@@ -357,6 +358,37 @@ profiles/
   account-2/
     src/
 ```
+
+To create a profile and open Brave for manual login, run:
+
+```bash
+python -m zepuppeteer createProfile account-3
+# Preview paths without creating files or launching Brave:
+python -m zepuppeteer createProfile account-3 --dry-run
+```
+
+The command creates `profiles/account-3/profile.toml` with enabled metadata and
+empty settings, plus `profiles/account-3/src/` for persistent Brave data. Log in
+to the required websites in the browser, complete any MFA, then close the browser
+to finish. Brave stores persistent cookies and website data in `src/`; subsequent
+workflows using `--profile account-3` reuse that data. Websites can still expire
+sessions or require login again. Add account-specific workflow settings to the
+generated TOML before running those workflows.
+
+Use `--profiles-dir PATH`, `--executable PATH`, or `--no-install` as needed.
+`create-profile` is an alias. This task requires a desktop display and accepts
+only a new, non-hidden profile directory name; existing profiles are never
+overwritten. Browser data stays in place if setup is interrupted or browser
+startup fails. To reopen it and finish logging in, use:
+
+```bash
+brave-browser --user-data-dir="$(pwd)/profiles/account-3/src"
+```
+
+For Python callers, `await createProfile("account-3", profiles_dir="./profiles")`
+from `zepuppeteer.tasks.createProfile` returns a `TaskResult` with the profile ID,
+manifest path, and browser data directory after the browser closes. Profile
+creation is a standalone setup task, performed before running workflows.
 
 An empty `src/` is initialized by Brave on first execution. A profile metadata
 file can also designate a new managed profile before `src/` exists. Folder names
@@ -639,6 +671,87 @@ labels. Unrecognized UI returns an unverified state and requires attention.
 These selectors have local DOM-fixture coverage; a signed-in Kaggle notebook
 has not been used for end-to-end verification. The task does not sign in, start
 sessions, edit or execute cells, or save notebook versions automatically.
+
+## VPN connectivity task
+
+`vpnCheck` accepts a profile directory name and tests an HTTPS request through
+that profile's VPN without opening Brave:
+
+```bash
+python -m zepuppeteer vpnCheck acc-5
+python -m zepuppeteer vpnCheck acc-5 --profiles-dir ./profiles --timeout 20
+```
+
+Add one of these configurations to `profiles/<account>/profile.toml`:
+
+```toml
+[profile.vpn]
+vpn_protocol = "wireguard"
+wireguard_file = "tunnel.conf"
+```
+
+```toml
+[profile.vpn]
+vpn_protocol = "v2ray"
+v2ray_link = "vless://YOUR_ID@vpn.example.com:443?security=tls&type=ws&path=%2Fvpn"
+```
+
+The same keys directly under `[profile]` or at the top level are also accepted.
+`wireguard_file` can be absolute or relative to the containing `profile.toml`.
+The command exits with an error for missing tools, invalid settings, or failed
+connectivity; it never installs software. Both protocols need `curl`. V2Ray
+needs `xray` on PATH and supports VLESS, VMess, Trojan, and SIP002 Shadowsocks
+share links. Supported transports are TCP/RAW, WebSocket, gRPC, HTTPUpgrade, and
+XHTTP, with none/TLS/REALITY security as appropriate. Unsupported link formats,
+TCP header obfuscation, Shadowsocks plugins, and links disabling TLS verification
+are rejected. Xray validates the generated configuration before starting.
+
+WireGuard needs Linux network namespaces, kernel WireGuard support, `wg`
+(wireguard-tools), and `ip` (iproute2). A normal user also needs `sudo` access.
+Terminal runs reuse cached authorization or show sudo's native password prompt
+before creating any network resources. You can also run `sudo -v` in the same
+terminal before retrying the command. Runs without a terminal never prompt and
+need sudo authorization configured in advance. All subsequent privileged
+commands use `sudo -n`.
+Keys and peer endpoints are validated before sudo or network setup. Endpoint
+hostnames are resolved using the host's DNS and passed to `wg` as numeric IPs;
+DNS errors identify that prerequisite directly. If `wg setconf` fails, its
+diagnostic is shown with WireGuard keys redacted.
+
+The stripped WireGuard configuration is staged as a root-owned mode-600 file in
+`/etc/wireguard`, which is allowed by Ubuntu's `wg` AppArmor policy. The task uses
+the standard `mkdir`, `install`, and `rm` utilities for this. It removes the file
+immediately after loading, and also attempts removal on failure or cancellation.
+
+The task creates a temporary WireGuard interface, moves it into a disposable
+namespace, and routes only the probe IP there. It leaves host routes and DNS
+unchanged, ignores wg-quick shell hooks, and does not reuse existing VPN
+interfaces. Configured ListenPort and FwMark are omitted to avoid host conflicts.
+See WireGuard's [network namespace documentation](https://www.wireguard.com/netns/)
+for the interface isolation mechanism.
+
+The default probe is `https://1.1.1.1/cdn-cgi/trace`. Override it with `--url`;
+WireGuard requires a numeric IP host covered by the configuration's AllowedIPs
+and a matching IPv4/IPv6 interface address. This checks internet access through
+the tunnel, so a private-network VPN may need its own reachable HTTPS endpoint.
+The result prints total HTTPS request latency in milliseconds. WireGuard also
+attempts three ICMP pings when `ping` is installed; blocked/missing ICMP does not
+fail an otherwise successful HTTPS check. V2Ray reports HTTPS latency because
+the SOCKS proxy does not carry ICMP ping.
+
+Xray runs as a temporary process with an authenticated SOCKS listener on
+127.0.0.1 and no direct outbound fallback. Its temporary configuration is private
+and removed on exit. Temporary processes, interfaces, and namespaces are cleaned
+up on success, failure, timeout, or cancellation. Credentials are not printed.
+The generated configuration uses the official
+[Xray transports](https://xtls.github.io/en/config/transport.html) and
+[config validation command](https://github.com/XTLS/Xray-docs-next/blob/main/docs/en/document/command.md).
+
+For Python callers, use `await vpnCheck("acc-5", profiles_dir="./profiles")`
+from `zepuppeteer.tasks.vpnCheck`. It returns a `TaskResult` with `profile`,
+`vpn_protocol`, `connected`, `latency_ms`, and optional `ping_ms`. Existing
+browser workflows can include `task = "vpnCheck"`; the task reads the current
+profile's manifest and accepts `timeout` and `url` in `[steps.params]`.
 
 ## Writing tasks and website adapters
 

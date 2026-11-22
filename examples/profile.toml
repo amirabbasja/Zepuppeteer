@@ -13,6 +13,16 @@ base_url = "https://example.com"
 [settings.colab]
 notebook_url = "https://colab.research.google.com/notebooks/intro.ipynb"
 
+# Uncomment one VPN configuration to use: python -m zepuppeteer vpnCheck <account>
+# Paths are relative to this profile.toml. WireGuard checks require Linux.
+# [profile.vpn]
+# vpn_protocol = "wireguard"
+# wireguard_file = "tunnel.conf"
+#
+# [profile.vpn]
+# vpn_protocol = "v2ray"
+# v2ray_link = "vless://YOUR_ID@vpn.example.com:443?security=tls&type=ws&path=%2Fvpn"
+
 # Uncomment to enable the Kaggle workflow for this profile:
 # [profile.platforms.kaggle]
 # login_username = "your-kaggle-username"

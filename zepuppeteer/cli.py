@@ -69,6 +69,18 @@ def parser() -> argparse.ArgumentParser:
     _profile_arguments(profiles)
     _selection_arguments(profiles)
     profiles.add_argument("--include-disabled", action="store_true")
+    create = commands.add_parser("createProfile", aliases=["create-profile"],
+                                 help="Create a Brave profile and open it for manual login")
+    create.add_argument("profile_name", help="New profile directory name")
+    create.add_argument("--profiles-dir", default="./profiles")
+    create.add_argument("--executable", help="Path or command name of the Brave executable")
+    create.add_argument("--no-install", action="store_true", help="Fail instead of installing missing Brave")
+    create.add_argument("--dry-run", action="store_true", help="Preview without creating files or opening Brave")
+    vpn = commands.add_parser("vpnCheck", help="Check one profile's VPN without opening Brave")
+    vpn.add_argument("profile_name", help="Profile directory name")
+    vpn.add_argument("--profiles-dir", default="./profiles")
+    vpn.add_argument("--timeout", type=float, default=15, help="Probe timeout in seconds (default: 15)")
+    vpn.add_argument("--url", default="https://1.1.1.1/cdn-cgi/trace", help="HTTPS connectivity probe URL")
     history = commands.add_parser("history", help="Read execution history as JSON")
     history.add_argument("--state-db", default="./data/runs.sqlite")
     history.add_argument("--limit", default=20, type=int)
@@ -95,6 +107,15 @@ def _profile_json(profile):
 
 async def run(args) -> None:
     command = getattr(args, "command", None)
+    if command in {"createProfile", "create-profile"}:
+        from .tasks.createProfile import createProfile
+        await createProfile(args.profile_name, profiles_dir=args.profiles_dir, executable=args.executable,
+                            no_install=args.no_install, dry_run=args.dry_run)
+        return
+    if command == "vpnCheck":
+        from .tasks.vpnCheck import vpnCheck
+        await vpnCheck(args.profile_name, profiles_dir=args.profiles_dir, timeout=args.timeout, url=args.url)
+        return
     if command == "history":
         print(json.dumps(read_history(args.state_db, limit=args.limit, run_id=args.run_id), indent=2))
         return

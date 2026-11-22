@@ -160,13 +160,15 @@ async def keepAlive(page, task_number=None, *, random=False) -> int:
         2. Click Additional connection options, wait two seconds, and View resources.
         3. Click Insert, wait two seconds, click Code cell, wait two seconds,
             activate the new cell, and delete it using its trash button.
-        4. Click Insert, wait two seconds, click Code cell, type
-            print("status update") with variable delays, and save through File.
-            The newly added cell is kept and is not executed.
-        5. Click the first code cell, wait one second, and replace everything
+        4. Click Insert, wait two seconds, click Code cell, scroll to it, and type
+            print("status update") with variable delays, delete the new cell,
+            and save through File. The new cell is not executed.
+        5. Scroll to the first code cell, click it, wait one second, and replace everything
             below its # Status update marker with a comment containing the current
             time, training status, random percentage, and random epoch count.
-            Wait two seconds, click File, wait one second, and click Save.
+            The marker may have trailing text, such as # Status update Comments.
+            Type the comment with variable delays, wait two seconds, click File,
+            wait two seconds, and click Save.
 
     Args:
         page (Page): The Playwright page containing the Colab notebook.
@@ -210,6 +212,7 @@ async def keepAlive(page, task_number=None, *, random=False) -> int:
         if not await cell.count():
             raise NeedsAttention("The notebook has no rendered code cells to update.")
         await cell.scroll_into_view_if_needed(timeout=10_000)
+        await cell.evaluate("cell => cell.scrollIntoView({block: 'center', inline: 'nearest', behavior: 'instant'})")
         await cell.click(timeout=10_000)
         await asyncio.sleep(1)
         # Monaco's textarea can contain only part of the source. Read its model
@@ -228,9 +231,11 @@ async def keepAlive(page, task_number=None, *, random=False) -> int:
         }""")
         if source is None:
             raise NeedsAttention("Could not read the first Colab code cell's full source; no text was changed.")
-        marker = re.search(r"^[ \t]*#[ \t]*Status[ \t]+update[ \t]*\r?$", source, re.I | re.M)
+        marker = re.search(r"^[^\S\r\n]*#[^\S\r\n]*Status[^\S\r\n]+update\b[^\r\n]*\r?$", source, re.I | re.M)
         if marker is None:
-            raise NeedsAttention("The first Colab code cell has no # Status update marker; no text was changed.")
+            raise NeedsAttention(
+                "The first Colab code cell has no comment line starting with # Status update; no text was changed."
+            )
 
         timestamp = datetime.now(ZoneInfo("Asia/Tehran")).strftime("%Y-%m-%d %H:%M:%S %z")
         comment = (
@@ -241,11 +246,13 @@ async def keepAlive(page, task_number=None, *, random=False) -> int:
         editor = cell.locator("textarea, [contenteditable='true']").first
         # Preserve the prefix verbatim rather than navigating by visual lines,
         # which may wrap and place the cursor above the marker.
-        updated_source = source[:marker.end()].removesuffix("\r") + "\n" + comment
+        preserved_source = source[:marker.end()].removesuffix("\r") + "\n"
         await editor.press("ControlOrMeta+A", timeout=10_000)
-        await page.keyboard.insert_text(updated_source)
+        await page.keyboard.insert_text(preserved_source)
+        for character in comment:
+            await editor.press_sequentially(character, delay=random_module.randint(60, 180))
         await asyncio.sleep(2)
-        await save(menu_delay=1)
+        await save(menu_delay=2)
     else:
         cells = page.locator(".cell.code")
         previous_ids = await cells.evaluate_all("cells => cells.map(cell => cell.id)")
@@ -267,15 +274,23 @@ async def keepAlive(page, task_number=None, *, random=False) -> int:
         if task_number == 3:
             await asyncio.sleep(2)
             await cell.click(timeout=10_000)
-            await cell.hover(timeout=10_000)
-            await cell.get_by_role("button", name=re.compile(
-                r"^(?:Delete cell|Remove cell|Delete)(?:\s|$)", re.I,
-            )).click(timeout=10_000)
         else:
             editor = cell.locator("textarea, [contenteditable='true']").first
-            await editor.click(timeout=10_000)
+            await cell.scroll_into_view_if_needed(timeout=10_000)
+            await cell.evaluate("cell => cell.scrollIntoView({block: 'center', inline: 'nearest', behavior: 'instant'})")
+            # Monaco renders its text over the input textarea, intercepting
+            # pointer clicks. Focus the input directly before sending keystrokes.
+            await editor.focus(timeout=10_000)
             for character in 'print("status update")':
                 await editor.press_sequentially(character, delay=random_module.randint(60, 180))
+        await cell.hover(timeout=10_000)
+        await asyncio.sleep(1)
+        await cell.get_by_role("button", name=re.compile(
+            r"^(?:Delete cell|Remove cell|Delete)(?:\s|$)", re.I,
+        )).click(timeout=10_000)
+        await cell.wait_for(state="detached", timeout=10_000)
+        if task_number == 4:
+            await asyncio.sleep(1)
             await save()
     
     await asyncio.sleep(10)  # Allow the save to finish before returning.
@@ -537,7 +552,7 @@ async def run(ctx: TaskContext) -> TaskResult:
         print_state(ctx.profile.name, f"Colab runtime is already connected.", verbose = verbose)
         print_state(ctx.profile.name, f"Starting the keepAlive tasks...", verbose = verbose)
         
-        await keepAlive(page, task_number = 2)
+        await keepAlive(page, task_number = 5)
         print()
         exit()
         pass
