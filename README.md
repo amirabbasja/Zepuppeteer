@@ -359,33 +359,42 @@ profiles/
     src/
 ```
 
-To create a profile and open Brave for manual login, run:
+After adding an account's information to `profiles/<id>/profile.toml`, initialize
+its Brave profile and open it for manual login:
 
 ```bash
-python -m zepuppeteer createProfile account-3
+python -m zepuppeteer createProfile acc-5
 # Preview paths without creating files or launching Brave:
-python -m zepuppeteer createProfile account-3 --dry-run
+python -m zepuppeteer createProfile acc-5 --dry-run
 ```
 
-The command creates `profiles/account-3/profile.toml` with enabled metadata and
-empty settings, plus `profiles/account-3/src/` for persistent Brave data. Log in
-to the required websites in the browser, complete any MFA, then close the browser
-to finish. Brave stores persistent cookies and website data in `src/`; subsequent
-workflows using `--profile account-3` reuse that data. Websites can still expire
-sessions or require login again. Add account-specific workflow settings to the
-generated TOML before running those workflows.
+The command reads the existing TOML and preserves its contents. With
+`profile.brave_browser_displayName`, it creates that named profile in the
+installed Brave browser's user-data root if missing, or reopens the matching
+profile if it already exists. Other Brave profiles and settings are preserved.
+Without a display-name setting, it initializes or reopens the account's local
+`src/` data. Existing flat browser data also keeps its original location.
+
+Log in to the required websites in the browser, complete any MFA, then close the
+browser to finish. Subsequent workflows using `--profile acc-5` reuse that browser
+data. Websites can still expire sessions or require login again.
+
+You can also pass a new account name. In that case, the command creates its folder,
+a default `profile.toml` with enabled metadata and empty settings, and `src/` for
+persistent Brave data. Add account-specific workflow settings to the generated
+TOML before running workflows.
 
 Use `--profiles-dir PATH`, `--executable PATH`, or `--no-install` as needed.
-`create-profile` is an alias. This task requires a desktop display and accepts
-only a new, non-hidden profile directory name; existing profiles are never
-overwritten. Browser data stays in place if setup is interrupted or browser
-startup fails. To reopen it and finish logging in, use:
+`create-profile` is an alias. This task requires a desktop display and a non-hidden
+profile directory name. Existing account configuration and saved logins are
+retained. Browser data stays in place if setup is interrupted or browser startup
+fails. Run the same setup command again to finish logging in:
 
 ```bash
-brave-browser --user-data-dir="$(pwd)/profiles/account-3/src"
+python -m zepuppeteer createProfile acc-5
 ```
 
-For Python callers, `await createProfile("account-3", profiles_dir="./profiles")`
+For Python callers, `await createProfile("acc-5", profiles_dir="./profiles")`
 from `zepuppeteer.tasks.createProfile` returns a `TaskResult` with the profile ID,
 manifest path, and browser data directory after the browser closes. Profile
 creation is a standalone setup task, performed before running workflows.
