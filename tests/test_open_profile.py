@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from zepuppeteer.cli import main
+from zepuppeteer.brave import native_command
 from zepuppeteer.tasks.openProfile import openProfile
 
 
@@ -83,17 +84,15 @@ class OpenProfileTests(unittest.IsolatedAsyncioTestCase):
         async def setup(**_):
             self.opened.set()
 
-        self.browser = SimpleNamespace(on=lambda event, callback: handlers.update({event: callback}),
-                                       close=AsyncMock(), add_init_script=AsyncMock(side_effect=setup),
-                                       pages=[], browser=SimpleNamespace(is_connected=Mock(return_value=True)))
+        closed = asyncio.Event()
+        handlers["close"] = closed.set
+        async def wait_closed():
+            self.opened.set()
+            await closed.wait()
+        self.browser = SimpleNamespace(close=AsyncMock(), wait_closed=wait_closed)
         launch = AsyncMock(return_value=self.browser)
-        playwright = SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=launch))
-
-        @contextlib.asynccontextmanager
-        async def factory():
-            yield playwright
-
-        with patch("playwright.async_api.async_playwright", factory), \
+        with patch("zepuppeteer.runner.launch_browser", launch), \
+                patch(f"{MODULE}.validate_desktop"), \
                 patch(f"{MODULE}.find_brave", return_value="/brave"), \
                 patch(f"{MODULE}.os.getuid", return_value=1000, create=True), \
                 patch.dict(os.environ, {"DISPLAY": ":0"}), contextlib.redirect_stdout(io.StringIO()):
@@ -111,7 +110,7 @@ class OpenProfileTests(unittest.IsolatedAsyncioTestCase):
         async with self.session() as (task, handlers, launch):
             self.assertFalse(task.done())
             self.browser.close.assert_not_awaited()
-            options = launch.call_args.kwargs
+            options = {**launch.call_args.kwargs, "user_data_dir": str(launch.call_args.args[1].user_data_dir), "args": native_command("/brave", launch.call_args.args[1])}
             self.assertFalse(options["headless"])
             self.assertEqual(options["user_data_dir"], str(self.account / "src"))
             self.assertIn("--profile-directory=Profile 2", options["args"])

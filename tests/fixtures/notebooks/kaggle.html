@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Screen Notebook | Kaggle</title>
+<style>
+body{margin:0;font:24px Arial,sans-serif;color:#111;background:white}
+header{height:160px;background:white;border-bottom:2px solid #777;padding:15px 25px;box-sizing:border-box}
+button,a{font:24px Arial,sans-serif;padding:8px 14px;color:#111;background:#eee;border:1px solid #777;border-radius:4px;cursor:pointer}
+.row{display:flex;gap:20px;align-items:center;justify-content:space-between;margin-bottom:20px}
+#account-menu,#session-menu{position:fixed;right:20px;top:105px;background:white;border:2px solid #222;padding:24px;z-index:4}
+main{padding:40px}
+</style>
+<header><div class="row"><span>Screen Notebook</span><button>Save Version</button><button onclick="accountMenu.hidden=false">Account</button></div>
+<div class="row"><span>Notebook editor</span><button onclick="sessionMenu.hidden=false">Session options</button></div></header>
+<div id="account-menu" hidden><a href="kaggle-profile.html">Your Profile</a></div>
+<div id="session-menu" hidden><button>Stop Session</button></div>
+<main>Code cell editor</main>
+<script>
+const accountMenu=document.getElementById('account-menu');
+const sessionMenu=document.getElementById('session-menu');
+addEventListener('keydown',event=>{if(event.key==='Escape'){accountMenu.hidden=true;sessionMenu.hidden=true}});
+</script>

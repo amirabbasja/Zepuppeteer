@@ -5,11 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "zepuppeteer"
 version = "0.1.0"
-description = "Profile groups and reusable web automation workflows with Brave and Playwright"
+description = "Profile groups and reusable web automation workflows with Brave and screen-based desktop input"
 requires-python = ">=3.10"
 dependencies = [
     "cryptography>=50.0.2",
-    "playwright>=1.58,<2",
+    "PyAutoGUI>=0.9.54,<1",
+    "Pillow>=11,<13",
+    "mss>=10.1,<11",
+    "pytesseract>=0.3.13,<0.4",
+    "pyperclip>=1.9,<2",
+    "opencv-python-headless>=4.10,<5",
     "tomli>=2,<3; python_version < '3.11'",
 ]
 

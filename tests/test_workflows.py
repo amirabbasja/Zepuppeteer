@@ -85,16 +85,24 @@ class WorkflowRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.profiles = [Profile(name, self.root / name) for name in ["one", "two"]]
         self.contexts = [self.context(), self.context()]
         self.launch = AsyncMock(side_effect=self.contexts)
-        self.playwright = SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=self.launch))
+        launcher = patch("zepuppeteer.runner.launch_browser", self.launch)
+        launcher.start()
+        self.addCleanup(launcher.stop)
+        @asynccontextmanager
+        async def relay(proxy):
+            yield proxy
+        bridge = patch("zepuppeteer.runner.browser_proxy", relay)
+        bridge.start()
+        self.addCleanup(bridge.stop)
 
     def context(self):
         return SimpleNamespace(close=AsyncMock(), add_init_script=AsyncMock(), pages=[],
                                tracing=SimpleNamespace(start=AsyncMock(), stop=AsyncMock()))
 
     async def execute(self, steps, tasks, *, policy="continue", profiles=None):
-        return await run_workflow(self.playwright, self.profiles if profiles is None else profiles,
+        return await run_workflow(self.profiles if profiles is None else profiles,
                                   "/brave", Workflow("test", tuple(steps), policy), tasks,
-                                  self.state, self.root / "artifacts", headless=True)
+                                  self.state, self.root / "artifacts")
 
     def details(self, run_id=None):
         run_id = run_id or read_history(self.state.path)[0]["id"]
@@ -117,7 +125,7 @@ class WorkflowRunnerTests(unittest.IsolatedAsyncioTestCase):
                 self.contexts[0].close.assert_awaited_once()
                 events.append("vpn closed")
 
-        async def launch(**options):
+        async def launch(*args, **options):
             self.assertEqual(events, ["vpn connected"])
             self.assertEqual(options["proxy"], connection.proxy)
             events.append("browser launched")
@@ -160,7 +168,7 @@ class WorkflowRunnerTests(unittest.IsolatedAsyncioTestCase):
                                         {"colab.open_notebook": task}, profiles=self.profiles[:1])
         self.assertEqual(result.status, "success")
         connect.assert_not_called()
-        self.assertNotIn("proxy", self.launch.call_args.kwargs)
+        self.assertIsNone(self.launch.call_args.kwargs.get("proxy"))
         self.assertIsNone(task.call_args.args[0].vpn)
 
     async def test_pipeline_passes_outputs_and_opens_each_profile_only_once(self):
@@ -338,10 +346,6 @@ class WorkflowRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((summary.failed, summary.succeeded), (1, 1))
         self.assertEqual(self.details(summary.run_id)["steps"][0]["status"], "skipped")
         self.launch.side_effect = [self.contexts[0]]
-        self.contexts[0].add_init_script.side_effect = RuntimeError("setup failed")
-        await self.execute([Step("one", "task")], {"task": AsyncMock()}, profiles=self.profiles[:1])
-        self.contexts[0].close.assert_awaited_once()
-        self.contexts[0].add_init_script.side_effect = None
         self.contexts[0].close.side_effect = RuntimeError("close failed")
         self.launch.side_effect = [self.contexts[0]]
         summary = await self.execute([Step("one", "task")],

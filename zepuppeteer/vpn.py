@@ -267,3 +267,78 @@ async def connect_vpn(profile):
                 "Check profile.vpn, the connection file/link, and that xray and curl are installed on PATH."
             ) from None
         yield connection
+
+
+@asynccontextmanager
+async def browser_proxy(proxy):
+    """Bridge native Brave to the authenticated VPN without browser APIs.
+
+    Brave has no command-line proxy authentication. A short-lived loopback relay
+    adds credentials only on the connection to Xray, never in browser arguments.
+    """
+    import base64
+    from urllib.parse import urlsplit
+    if proxy is None:
+        raise VPNSetupError("VPN has no active browser proxy.")
+    url = urlsplit(proxy["server"])
+    if url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port:
+        raise VPNSetupError("VPN proxy must be an HTTP server on 127.0.0.1.")
+    auth = base64.b64encode(f"{proxy['username']}:{proxy['password']}".encode()).decode()
+    active = set()
+
+    async def relay(reader, writer):
+        task = asyncio.current_task()
+        active.add(task)
+        upstream = None
+        try:
+            headers = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 10)
+            lines = headers[:-4].split(b"\r\n")
+            method = lines[0].split(b" ", 1)[0]
+            # Never accept a caller's credentials or persist a plain HTTP socket
+            # that could send subsequent requests without the upstream header.
+            lines = [line for line in lines if not line.lower().startswith(
+                (b"proxy-authorization:", b"proxy-connection:", b"connection:"))]
+            lines.append(f"Proxy-Authorization: Basic {auth}".encode())
+            if method != b"CONNECT":
+                lines.append(b"Connection: close")
+            remote, upstream = await asyncio.wait_for(asyncio.open_connection(url.hostname, url.port), 10)
+            upstream.write(b"\r\n".join(lines) + b"\r\n\r\n")
+            await upstream.drain()
+
+            async def copy(source, destination):
+                while block := await source.read(65536):
+                    destination.write(block)
+                    await destination.drain()
+
+            pipes = [asyncio.create_task(copy(reader, upstream)), asyncio.create_task(copy(remote, writer))]
+            try:
+                done, _ = await asyncio.wait(pipes, return_when=asyncio.FIRST_COMPLETED)
+                for finished in done:
+                    finished.result()
+            finally:
+                for pipe in pipes:
+                    pipe.cancel()
+                await asyncio.gather(*pipes, return_exceptions=True)
+        except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+            pass  # Browser navigation surfaces connection errors; never log credentials.
+        finally:
+            for stream in (upstream, writer):
+                if stream is not None:
+                    stream.close()
+                    try:
+                        await stream.wait_closed()
+                    except (OSError, ConnectionError):
+                        pass
+            active.discard(task)
+
+    server = await asyncio.start_server(relay, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        yield {"server": f"http://127.0.0.1:{port}"}
+    finally:
+        server.close()
+        await server.wait_closed()
+        tasks = list(active)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

@@ -15,6 +15,7 @@ from .brave import find_brave, install_brave
 from .profiles import discover_profiles, select_profiles
 from .runner import run_profiles, run_workflow  # Keep the original public runner import working.
 from .state import StateStore, read_history
+from .screen import validate_desktop
 from .workflows import load_workflow, resolve_tasks, workflow_path
 
 
@@ -41,7 +42,7 @@ def _profile_arguments(result, *, required=False):
 def _browser_arguments(result):
     result.add_argument("--executable", help="Path or command name of the Brave executable")
     result.add_argument("--no-install", action="store_true", help="Fail instead of installing missing Brave")
-    result.add_argument("--headless", action="store_true", help="Run without a desktop window")
+    result.add_argument("--headless", action="store_true", help="Unsupported with screen automation; requires a visible desktop")
     result.add_argument("--dry-run", action="store_true", help="Preview without installing or launching")
 
 
@@ -64,7 +65,7 @@ def parser() -> argparse.ArgumentParser:
     workflow.add_argument("--workflow", required=True, help="Workflow name or path to a .toml file")
     workflow.add_argument("--state-db", default="./data/runs.sqlite", help="Execution history database")
     workflow.add_argument("--artifacts-dir", default="./artifacts", help="Task output and failure evidence root")
-    workflow.add_argument("--no-trace", action="store_true", help="Disable browser trace recording")
+    workflow.add_argument("--no-trace", action="store_true", help="Disable start/end screenshot archives")
     profiles = commands.add_parser("profiles", help="List selected profiles as JSON without opening Brave")
     _profile_arguments(profiles)
     _selection_arguments(profiles)
@@ -143,13 +144,14 @@ async def run(args) -> None:
     workflow = load_workflow(workflow_path(args.workflow, args.config_dir)) if command == "run" else None
     tasks = resolve_tasks(workflow) if workflow else None
     task_filename = getattr(args, "task", None)
-    if args.headless and not workflow and not task_filename and not args.dry_run:
-        raise ValueError("--headless requires --task so the browser can finish automatically.")
+    if args.headless:
+        raise ValueError("--headless is unsupported: screen automation requires a visible X11 desktop.")
     executable = find_brave(args.executable)
     if args.dry_run:
         plan = {
             "executable": executable or "Brave will be installed using sudo + APT",
             "profiles": [_profile_json(profile) for profile in profiles],
+            "backend": "screen",
         }
         if workflow:
             plan["workflow"] = asdict(workflow)
@@ -161,12 +163,7 @@ async def run(args) -> None:
     task = load_task(task_filename) if task_filename else None
     if hasattr(os, "getuid") and os.getuid() == 0:
         raise RuntimeError("Run Brave as your normal desktop user, not root.")
-    if not args.headless and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-        raise RuntimeError("No desktop display found. Run in a desktop terminal or use --headless with --task.")
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError as error:
-        raise RuntimeError("Playwright is missing. Install the project with: python -m pip install -e .") from error
+    validate_desktop(ocr=workflow is not None or task is not None)
     if not executable:
         if args.no_install:
             raise RuntimeError("Brave is not installed. Remove --no-install to install it automatically.")
@@ -174,16 +171,15 @@ async def run(args) -> None:
         executable = find_brave()
         if not executable:
             raise RuntimeError("Installation finished but Brave could not be found on PATH.")
-    async with async_playwright() as playwright:
-        if workflow:
-            with StateStore(args.state_db) as state:
-                summary = await run_workflow(playwright, profiles, executable, workflow, tasks, state,
-                                             args.artifacts_dir, headless=args.headless, trace=not args.no_trace)
-            if summary.failed:
-                raise RuntimeError(f"Workflow {workflow.name} failed for {summary.failed} profile(s); "
-                                   f"inspect history with --run-id {summary.run_id}.")
-        else:
-            await run_profiles(playwright, profiles, executable, task, args.headless)
+    if workflow:
+        with StateStore(args.state_db) as state:
+            summary = await run_workflow(profiles, executable, workflow, tasks, state,
+                                         args.artifacts_dir, trace=not args.no_trace)
+        if summary.failed:
+            raise RuntimeError(f"Workflow {workflow.name} failed for {summary.failed} profile(s); "
+                               f"inspect history with --run-id {summary.run_id}.")
+    else:
+        await run_profiles(profiles, executable, task)
 
 
 def main(argv=None) -> None:

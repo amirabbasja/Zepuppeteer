@@ -46,7 +46,7 @@ class KaggleTaskTests(unittest.IsolatedAsyncioTestCase):
         temporary = tempfile.TemporaryDirectory(prefix="zepuppeteer-kaggle-task-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.page = SimpleNamespace(title=AsyncMock(return_value="My Notebook | Kaggle"), close=AsyncMock())
+        self.page = SimpleNamespace(title=AsyncMock(return_value="My Notebook | Kaggle"), close=AsyncMock(), screenshot=AsyncMock())
         self.browser = SimpleNamespace(new_page=AsyncMock(return_value=self.page))
         self.manifest = self.root / "profile.toml"
         self.write_manifest()
@@ -73,7 +73,10 @@ class KaggleTaskTests(unittest.IsolatedAsyncioTestCase):
     async def test_verifies_manifest_account_notebook_and_runtime_then_closes_tab(self):
         result = await run(self.ctx)
         self.assertEqual(result.status, "success")
-        self.assertEqual(result.outputs, {})
+        self.assertEqual(result.outputs["runtime_status"], "connected")
+        self.assertEqual(result.outputs["backend"], "screen")
+        self.assertTrue(Path(result.outputs["metadata_path"]).is_file())
+        self.page.screenshot.assert_awaited_once()
         self.site_factory.assert_called_once_with(self.page)
         self.site.open_notebook.assert_awaited_once_with(NOTEBOOK_URL)
         self.login.assert_awaited_once_with(self.page, "test-user")

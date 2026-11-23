@@ -208,15 +208,9 @@ class ProfileSelectionTests(unittest.TestCase):
         self.account("one")
         browser = SimpleNamespace(close=AsyncMock(), add_init_script=AsyncMock(), pages=[],
                                   tracing=SimpleNamespace(start=AsyncMock(), stop=AsyncMock()))
-        playwright = SimpleNamespace(chromium=SimpleNamespace(
-            launch_persistent_context=AsyncMock(return_value=browser)))
-        @contextlib.asynccontextmanager
-        async def factory():
-            yield playwright
-        module = ModuleType("playwright.async_api")
-        module.async_playwright = factory
         database = self.root / "runs.sqlite"
-        with patch.dict("sys.modules", {"playwright": ModuleType("playwright"), "playwright.async_api": module}), \
+        with patch("zepuppeteer.runner.launch_browser", AsyncMock(return_value=browser)), \
+                patch("zepuppeteer.cli.validate_desktop"), \
                 patch("zepuppeteer.cli.find_brave", return_value="/brave"), \
                 patch("zepuppeteer.cli.os.getuid", return_value=1000, create=True), \
                 patch("zepuppeteer.cli.resolve_tasks", return_value={
@@ -224,7 +218,7 @@ class ProfileSelectionTests(unittest.TestCase):
                     "demo.verify_result": AsyncMock()}), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit) as failure:
-                main(["run", "--profiles-dir", str(self.profiles), "--workflow", "demo", "--headless",
+                main(["run", "--profiles-dir", str(self.profiles), "--workflow", "demo",
                       "--state-db", str(database), "--artifacts-dir", str(self.root / "artifacts")])
         self.assertEqual(failure.exception.code, 1)
         run, = read_history(database)

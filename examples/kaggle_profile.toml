@@ -1,0 +1,34 @@
+# Copy to profiles/<account>/profile.toml. Log in manually with createProfile.
+# Capture icon PNGs from your own normal Brave window; adjust regions for it.
+enabled = true
+tags = ["kaggle"]
+
+[profile.platforms.kaggle]
+login_username = "your-kaggle-handle"
+notebook_url = "https://www.kaggle.com/code/your-kaggle-handle/your-notebook/edit"
+notebook_name = "Your Notebook"
+
+[settings.screen.targets.kaggle_account]
+image = "icons/kaggle-account.png"
+region = [0.7, 0.08, 0.3, 0.25]
+
+[settings.screen.targets.kaggle_profile]
+text = "Your Profile"
+region = [0.5, 0.15, 0.5, 0.6]
+
+[settings.screen.targets.kaggle_runtime]
+region = [0.5, 0.08, 0.5, 0.35]
+
+# Optional: configure when session status is inside a menu rather than visible
+# on the toolbar. The task opens it to read status, then closes it with Escape.
+# [settings.screen.targets.kaggle_session_options]
+# image = "icons/session-options.png"
+# region = [0.5, 0.08, 0.5, 0.35]
+#
+# [settings.screen.targets.kaggle_session_status]
+# region = [0.5, 0.15, 0.5, 0.6]
+#
+# Optional icon-only connected-state recognition:
+# [settings.screen.targets.kaggle_runtime_connected]
+# image = "icons/session-connected.png"
+# region = [0.5, 0.08, 0.5, 0.35]

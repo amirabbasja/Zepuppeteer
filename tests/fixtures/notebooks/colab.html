@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Screen Notebook - Colab</title>
+<style>
+body{margin:0;font:24px Arial,sans-serif;color:#111;background:white}
+header{position:sticky;top:0;height:160px;background:#fff;border-bottom:2px solid #777;padding:15px 25px;box-sizing:border-box;z-index:2}
+button,a{font:24px Arial,sans-serif;padding:8px 14px;color:#111;background:#eee;border:1px solid #777;border-radius:4px;cursor:pointer}
+.row{display:flex;gap:20px;align-items:center;justify-content:space-between;margin-bottom:14px}
+#account-menu,#connection-menu{position:fixed;right:20px;top:105px;background:white;border:2px solid #222;padding:18px;z-index:4}
+#account-menu p{margin:12px 0}#runtime{min-width:160px;text-align:right}.cell{border:1px solid #aaa;padding:30px;margin:25px}
+#last-cell{height:150px}#spacer{height:900px}
+</style>
+<header>
+<div class="row"><span>File &nbsp; Insert &nbsp; Runtime</span><button onclick="runAll()">Run all</button><button onclick="accountMenu.hidden=false">Account</button></div>
+<div class="row"><span id="idle">Ready to run</span><span id="runtime">Connect</span><button onclick="connectionMenu.hidden=false">Options</button></div>
+</header>
+<div id="account-menu" hidden><p>Google Account</p><p>tester@example.com</p><p>other@example.com</p></div>
+<div id="connection-menu" hidden><button onclick="connect()">Connect to a hosted runtime</button></div>
+<section class="cell">Setup code cell</section><div id="spacer"></div>
+<section class="cell" id="last-cell"><p>Main job cell</p><p id="executing" hidden>Executing main job</p></section>
+<script>
+const accountMenu=document.getElementById('account-menu');
+const connectionMenu=document.getElementById('connection-menu');
+function connect(){connectionMenu.hidden=true;document.getElementById('runtime').textContent='Connecting';setTimeout(()=>document.getElementById('runtime').textContent='RAM Disk',500)}
+function runAll(){document.getElementById('idle').textContent='Execution started';setTimeout(()=>document.getElementById('executing').hidden=false,500)}
+addEventListener('keydown',event=>{if(event.key==='Escape'){accountMenu.hidden=true;connectionMenu.hidden=true}});
+</script>

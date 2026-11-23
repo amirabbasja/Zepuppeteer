@@ -1,22 +1,31 @@
-"""A local website adapter for smoke tests; no account or network is required."""
+"""A local screen automation fixture, with no account or network required."""
+
+from pathlib import Path
+import tempfile
 
 
 class DemoSite:
     def __init__(self, page):
         self.page = page
+        self.temporary = tempfile.TemporaryDirectory(prefix="zepuppeteer-screen-demo-")
 
     async def open(self):
-        await self.page.set_content("""<!doctype html><html><body>
-            <label>Name <input id="name"></label>
-            <button onclick="document.querySelector('#result').textContent = document.querySelector('#name').value">Apply</button>
-            <p id="result" role="status"></p>
-            </body></html>""")
+        path = Path(self.temporary.name) / "demo.html"
+        path.write_text('''<!doctype html><title>Screen automation demo</title>
+            <style>body{font:24px sans-serif;padding:60px}input,button{font:24px sans-serif;margin:16px}
+            #result{margin-top:60px}</style>
+            <label for="name">Name</label><input id="name" autocomplete="off">
+            <button onclick="document.querySelector('#result').textContent='Result: '+document.querySelector('#name').value">Apply</button>
+            <p id="result"></p>''', encoding="utf-8")
+        await self.page.goto(path.as_uri())
+        await self.page.wait_for_text("Apply")
 
-    async def submit_name(self, name: str) -> str:
-        from playwright.async_api import expect
+    async def submit_name(self, name):
+        await self.page.click_text("Name")
+        await self.page.fill_text(name)
+        await self.page.click_text("Apply")
+        await self.page.wait_for_text(f"Result: {name}")
+        return name
 
-        await self.page.get_by_label("Name", exact=True).fill(name)
-        await self.page.get_by_role("button", name="Apply", exact=True).click()
-        result = self.page.get_by_role("status")
-        await expect(result).to_have_text(name)
-        return await result.inner_text()
+    def close(self):
+        self.temporary.cleanup()

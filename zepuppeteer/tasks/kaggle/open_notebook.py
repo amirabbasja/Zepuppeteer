@@ -3,88 +3,81 @@
 import asyncio
 import re
 import time
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 
 from ...config import read_toml
 from ...models import NeedsAttention, TaskContext, TaskResult
-from ...websites.kaggle import KAGGLE_HOSTS, KaggleSite, validate_notebook_url
+from ...websites.kaggle import KAGGLE_HOSTS, KaggleSite, validate_notebook_url, TOOLBAR, RUNTIME
+from ...websites.notebooks import save_notebook_evidence, target_region, visual_runtime_state
 
 
-async def check_login(page, expected_username: str, timeout=15) -> str:
-    """Read the account menu's profile link, never the notebook author's link."""
-    account_navigation = page.get_by_role("navigation", name="Main menu, search and your account")
-    account_button = account_navigation.get_by_role("button", name=re.compile(
-        r"^(?:Your profile|Your account|Account menu|User menu|Profile)(?:\b|$)", re.I)).first
-    account_image = account_navigation.get_by_role("img", name=re.compile(r"^Your profile$", re.I)).first
-    profile_name = re.compile(r"^(?:Your|My) Profile$", re.I)
-    profile_link = account_navigation.get_by_role("link", name=profile_name).or_(
-        page.get_by_role("menu").locator("a[href]").filter(has_text=profile_name)).first
-    sign_in = account_navigation.get_by_role("link", name=re.compile(r"^(?:Sign in|Log in|Login)$", re.I)).first
-    deadline = time.monotonic() + timeout
-    opened_menu = None
+async def check_login(page, expected_username, timeout=15):
+    """Verify the account menu's own profile URL, read through the address bar."""
+    url = urlsplit(await page.current_url())
+    if url.hostname in {"accounts.google.com", "consent.google.com"} or url.path.startswith("/account/"):
+        return "logged_out"
+    notebook_title = await page.title()
+    await page.click_target("kaggle_account", timeout=timeout)
+    navigated = False
     try:
-        while time.monotonic() < deadline:
-            url = urlsplit(page.url)
-            if (url.hostname in {"accounts.google.com", "consent.google.com"}
-                    or (url.hostname in KAGGLE_HOSTS and url.path.startswith("/account/"))):
-                return "logged_out"
-            if await sign_in.is_visible():
-                return "logged_out"
-            if await profile_link.is_visible():
-                profile_url = urlsplit(urljoin(page.url, await profile_link.get_attribute("href") or ""))
-                if profile_url.hostname in KAGGLE_HOSTS:
-                    username = profile_url.path.strip("/")
-                    if re.fullmatch(r"[\w-]+", username, re.ASCII):
-                        return "logged_in" if username.casefold() == expected_username.strip().casefold() else "wrong_account"
-            if opened_menu is None:
-                if await account_button.is_visible():
-                    opened_menu = account_button
-                elif await account_image.is_visible():
-                    opened_menu = account_image
-                if opened_menu is not None:
-                    await opened_menu.click(timeout=1000)
+        await page.click_target("kaggle_profile", text="Your Profile", timeout=timeout)
+        deadline = time.monotonic() + timeout
+        # Reading the address bar sends Escape afterward. Wait for the profile
+        # navigation to commit first so Escape cannot cancel an in-flight load.
+        while await page.title() == notebook_title:
+            if time.monotonic() >= deadline:
+                return "unknown"
             await asyncio.sleep(0.25)
-        return "unknown"
+        navigated = True
+        while True:
+            profile_url = urlsplit(await page.current_url())
+            navigated = navigated or profile_url.geturl() != url.geturl()
+            username = profile_url.path.strip("/")
+            if profile_url.hostname in KAGGLE_HOSTS and re.fullmatch(r"[\w-]+", username, re.ASCII):
+                return "logged_in" if username.casefold() == expected_username.strip().casefold() else "wrong_account"
+            if profile_url.hostname in {"accounts.google.com", "consent.google.com"} or profile_url.path.startswith("/account/"):
+                return "logged_out"
+            if time.monotonic() >= deadline:
+                return "unknown"
+            await asyncio.sleep(0.25)
     finally:
-        if opened_menu is not None:
-            await page.keyboard.press("Escape")
+        if navigated:
+            await page.hotkey("alt", "left")
+            await page.wait_for_text("Save Version", timeout=timeout, region=TOOLBAR)
+        await page.press("esc")
 
 
-async def check_runtime_connection(page, timeout=15) -> str:
-    """Inspect session controls without starting, reconnecting, or stopping a runtime."""
-    def control(pattern):
-        name = re.compile(pattern, re.I)
-        return page.get_by_role("button", name=name).or_(page.get_by_role("menuitem", name=name)).first
-
-    prefix = r"^(?:(?:Draft\s+)?Session\s*:?\s*)?"
-    connecting = control(prefix + r"(?:Starting|Connecting|Reconnecting|Allocating|Initializing|Adding data)\b")
-    disconnected = control(prefix + r"(?:Start(?:\s+Session)?|Connect|Reconnect|Disconnected|Stopped|Inactive|Off|Error)\b")
-    connected = control(prefix + r"(?:Running|Active|Connected)\b|^Stop Session\b")
-    session_menu = page.get_by_role("button", name=re.compile(r"^Session (?:options|menu)$", re.I)).first
-    deadline = time.monotonic() + timeout
-    state = "unknown"
-    opened_menu = False
+async def check_runtime_connection(page, timeout=15):
+    """Read visible session controls, opening the options menu only if needed."""
+    region = target_region(page, "kaggle_runtime", RUNTIME)
+    deadline, state, opened_menu = time.monotonic() + timeout, "unknown", False
     try:
-        while time.monotonic() < deadline:
-            # Transitional and disconnected controls take precedence over stale state.
-            if await connecting.is_visible():
+        while True:
+            visual = await visual_runtime_state(page, "kaggle", ("connecting", "disconnected", "connected"))
+            text = "" if visual else await page.read_text(region)
+            if visual:
+                state = visual
+                if state == "connected":
+                    return state
+            elif re.search(r"\b(?:Starting|Connecting|Reconnecting|Allocating|Initializing|Adding data)\b", text, re.I):
                 state = "connecting"
-            elif await disconnected.is_visible() and await disconnected.is_enabled():
+            elif re.search(r"\b(?:Start Session|Connect|Reconnect|Disconnected|Stopped|Inactive|Off|Error)\b", text, re.I):
                 state = "disconnected"
-            elif await connected.is_visible() and await connected.is_enabled():
+            elif re.search(r"\b(?:Running|Active|Connected|Stop Session)\b", text, re.I):
                 return "connected"
             else:
                 state = "unknown"
-                # Some editor versions expose state only inside the session menu.
-                # Open that menu to read it; never select a session action.
-                if not opened_menu and await session_menu.is_visible():
-                    await session_menu.click(timeout=1000)
+                if not opened_menu and "kaggle_session_options" in page.browser.targets:
+                    await page.click_target("kaggle_session_options", timeout=max(0.1, deadline - time.monotonic()))
                     opened_menu = True
-            await asyncio.sleep(0.25)
-        return state
+                    region = target_region(page, "kaggle_session_status", RUNTIME)
+                    continue
+            if time.monotonic() >= deadline:
+                return state
+            await asyncio.sleep(0.3)
     finally:
         if opened_menu:
-            await page.keyboard.press("Escape")
+            await page.press("esc")
 
 
 async def run(ctx: TaskContext) -> TaskResult:
@@ -110,7 +103,7 @@ async def run(ctx: TaskContext) -> TaskResult:
         raise ValueError("Kaggle notebook_name must be a nonempty string.")
 
     page = await ctx.browser.new_page()
-    await KaggleSite(page).open_notebook(notebook_url)
+    notebook = await KaggleSite(page).open_notebook(notebook_url)
     login_status = await check_login(page, expected_username)
     if login_status != "logged_in":
         raise NeedsAttention(f"Profile '{ctx.profile.name}': Kaggle login check returned {login_status}.")
@@ -129,6 +122,7 @@ async def run(ctx: TaskContext) -> TaskResult:
             "Start the notebook session manually, then retry."
         )
 
-    # On failure the page stays open for runner screenshots and trace collection.
+    outputs = await save_notebook_evidence(ctx, page, "kaggle", notebook, notebook_url,
+                                           runtime_status=runtime_status, action="verify")
     await page.close()
-    return TaskResult(outputs={}, status="success", message="Kaggle notebook editor loaded and verified.")
+    return TaskResult(outputs=outputs, message="Kaggle notebook editor loaded and verified.")

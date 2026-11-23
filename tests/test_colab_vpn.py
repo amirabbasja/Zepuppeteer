@@ -25,7 +25,7 @@ class ColabVPNGateTests(unittest.IsolatedAsyncioTestCase):
         self.manifest = self.root / "profile.toml"
         self.write_manifest("true")
         self.page = SimpleNamespace(title=AsyncMock(return_value="test.ipynb - Colab"), close=AsyncMock(),
-                                    get_by_role=Mock(return_value=SimpleNamespace(click=AsyncMock())))
+                                    click_target=AsyncMock(), click_text=AsyncMock(), screenshot=AsyncMock())
         self.browser = SimpleNamespace(new_page=AsyncMock(return_value=self.page))
         self.connection = SimpleNamespace(profile_name="test", heartbeat=AsyncMock())
         self.ctx = TaskContext(self.browser, Profile("test", self.root, manifest_path=self.manifest),

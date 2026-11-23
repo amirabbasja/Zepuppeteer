@@ -11,33 +11,25 @@ import re
 import sys
 from uuid import uuid4
 
-from .brave import hide_webdriver, launch_options, prepare_profile_for_launch
+from .screen import launch_browser
 from .config import json_text
 from .models import NeedsAttention, RunSummary, TaskContext, TaskResult
 from .notifications import notify_attention
-from .vpn import colab_uses_vpn, connect_vpn
+from .vpn import colab_uses_vpn, connect_vpn, browser_proxy
 
 
-async def run_profiles(playwright, profiles, executable, task=None, headless=False):
-    """Legacy single-file task API; failures still stop subsequent profiles."""
+async def run_profiles(profiles, executable, task=None, headless=False):
+    """Run screen tasks sequentially; manual sessions wait for browser closure."""
     for profile in profiles:
         print(f"Opening profile: {profile.name}", flush=True)
-        prepare_profile_for_launch(profile)
-        context = await playwright.chromium.launch_persistent_context(
-            **launch_options(executable, profile, headless)
-        )
-        closed = asyncio.Event()
-        context.on("close", lambda *_: closed.set())
+        context = await launch_browser(executable, profile, headless=headless, interactive=task is None)
         try:
-            await hide_webdriver(context)
             if task:
                 await task(context=context, profile=profile)
                 print(f"Completed profile: {profile.name}", flush=True)
             else:
                 print("Close this browser to continue to the next profile. Ctrl+C stops the runner.", flush=True)
-                if context.browser is not None and not context.browser.is_connected():
-                    closed.set()
-                await closed.wait()
+                await context.wait_closed()
         finally:
             await context.close()
 
@@ -146,7 +138,7 @@ async def _steps(browser, profile, workflow, tasks, state, run_id, directory, tr
     return None
 
 
-async def _profile(playwright, profile, executable, workflow, tasks, state, run_id,
+async def _profile(profile, executable, workflow, tasks, state, run_id,
                    directory, headless, trace) -> str:
     browser, status, error = None, "success", None
     resources, vpn = AsyncExitStack(), None
@@ -156,14 +148,8 @@ async def _profile(playwright, profile, executable, workflow, tasks, state, run_
         directory.mkdir(parents=True)
         if any(step.task == "colab.open_notebook" for step in workflow.steps) and colab_uses_vpn(profile):
             vpn = await resources.enter_async_context(connect_vpn(profile))
-        prepare_profile_for_launch(profile)
-        options = launch_options(executable, profile, headless)
-        if vpn is not None and vpn.proxy is not None:
-            options["proxy"] = vpn.proxy
-            options["args"] += ["--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"]
-        browser = await playwright.chromium.launch_persistent_context(
-            **options)
-        await hide_webdriver(browser)
+        proxy = await resources.enter_async_context(browser_proxy(vpn.proxy)) if vpn is not None else None
+        browser = await launch_browser(executable, profile, headless=headless, proxy=proxy)
         error = await _steps(browser, profile, workflow, tasks, state, run_id, directory, trace, vpn=vpn)
         if error:
             status = "failed"
@@ -210,7 +196,7 @@ async def _profile(playwright, profile, executable, workflow, tasks, state, run_
     return status
 
 
-async def run_workflow(playwright, profiles, executable, workflow, tasks, state,
+async def run_workflow(profiles, executable, workflow, tasks, state,
                        artifact_root: str | Path = "artifacts", *, headless=False, trace=True) -> RunSummary:
     """One browser per profile, ordered steps, and a committed result after each step."""
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:12]
@@ -220,7 +206,7 @@ async def run_workflow(playwright, profiles, executable, workflow, tasks, state,
     counts = {"success": 0, "failed": 0}
     try:
         for profile in profiles:
-            status = await _profile(playwright, profile, executable, workflow, tasks, state, run_id,
+            status = await _profile(profile, executable, workflow, tasks, state, run_id,
                                     directory / _component(profile.name), headless, trace)
             counts[status] += 1
             if status == "failed" and workflow.on_profile_failure == "stop":

@@ -9,6 +9,7 @@ from ..models import Profile, TaskResult
 from ..profiles import load_profile
 from ..profile_transfer import atomic_write, ensure_closed, find_profile, read_state, state_bytes
 from ..runner import run_profiles
+from ..screen import validate_desktop
 
 
 _MANIFEST = """# Brave browser data and saved logins are stored in src/ beside this file.
@@ -92,10 +93,7 @@ async def createProfile(profile_name: str, *, profiles_dir: str | Path = "./prof
         raise RuntimeError("Run Brave as your normal desktop user, not root.")
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         raise RuntimeError("Manual login requires a desktop display. Run in a desktop terminal.")
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError as error:
-        raise RuntimeError("Playwright is missing. Install the project with: python -m pip install -e .") from error
+    validate_desktop(ocr=False)
     if not executable:
         if no_install:
             raise RuntimeError("Brave is not installed. Remove --no-install to install it automatically.")
@@ -119,7 +117,6 @@ async def createProfile(profile_name: str, *, profiles_dir: str | Path = "./prof
         profile.user_data_dir.mkdir(mode=0o700, exist_ok=True)
     print("Log in to the required websites in Brave, then close the browser when finished. "
           f"Cookies and browser data are kept in {profile.user_data_dir}.", flush=True)
-    async with async_playwright() as playwright:
-        await run_profiles(playwright, [profile], executable)
+    await run_profiles([profile], executable)
     print(f"Closed profile: {profile.name}. Browser data retained in {profile.user_data_dir}.", flush=True)
     return TaskResult(outputs=outputs, message="Manual setup session closed; browser data retained.")

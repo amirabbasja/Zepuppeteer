@@ -1,0 +1,61 @@
+# Copy to profiles/<account>/profile.toml and keep its src/ browser data beside it.
+# Capture the icon PNGs from YOUR normal Brave window at its usual zoom/theme.
+enabled = true
+tags = ["colab"]
+
+[profile.platforms.colab]
+login_username = "you@example.com"
+notebook_url = "https://colab.research.google.com/drive/YOUR_NOTEBOOK_ID"
+notebook_name = "Your Notebook.ipynb"
+auto_connect = true
+use_vpn = false
+job_start_timeout_seconds = 300
+
+# Every region is [left, top, width, height] fractions of the browser window.
+# Adjust the sample regions to your own layout.
+[settings.screen.targets.google_account]
+image = "icons/google-account.png"
+region = [0.7, 0.08, 0.3, 0.25]
+
+[settings.screen.targets.google_active_account]
+region = [0.5, 0.15, 0.5, 0.35]
+
+[settings.screen.targets.colab_runtime]
+region = [0.5, 0.08, 0.5, 0.3]
+
+[settings.screen.targets.colab_connection_options]
+image = "icons/connection-options.png"
+region = [0.5, 0.08, 0.5, 0.3]
+
+[settings.screen.targets.colab_connect_hosted]
+text = "Connect to a hosted runtime"
+region = [0.4, 0.15, 0.6, 0.55]
+
+# The idle-state image must distinguish idle from queued/running execution.
+[settings.screen.targets.colab_notebook_idle]
+image = "icons/notebook-idle.png"
+region = [0.0, 0.08, 1.0, 0.25]
+
+# These are measured with the notebook scrolled to its final code cell.
+[settings.screen.targets.colab_last_cell_anchor]
+text = "REPLACE WITH DISTINCTIVE TEXT IN YOUR FINAL CODE CELL"
+region = [0.0, 0.4, 1.0, 0.6]
+
+[settings.screen.targets.colab_last_cell_running]
+image = "icons/final-cell-executing.png"
+region = [0.0, 0.4, 0.25, 0.6]
+
+# Used by keepAlive task 5 for an already connected runtime. The editor anchor
+# must focus the FIRST cell containing the # Status update comment marker.
+[settings.screen.targets.colab_first_cell_editor]
+image = "icons/first-cell-editor.png"
+region = [0.0, 0.25, 1.0, 0.5]
+
+[settings.screen.targets.colab_saved]
+text = "All changes saved"
+region = [0.0, 0.08, 1.0, 0.25]
+
+# Optional icon-only runtime state recognition when OCR cannot read the toolbar:
+# [settings.screen.targets.colab_runtime_connected]
+# image = "icons/runtime-connected.png"
+# region = [0.5, 0.08, 0.5, 0.3]

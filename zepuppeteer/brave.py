@@ -15,38 +15,6 @@ from .profiles import discover_profiles  # Backwards-compatible public import.
 from .profile_transfer import atomic_write, ensure_closed
 
 
-_WEBDRIVER_INIT_SCRIPT = """
-Object.defineProperty(Navigator.prototype, "webdriver", {
-    get: () => undefined,
-    configurable: true,
-});
-"""
-
-
-async def hide_webdriver(context) -> None:
-    """Return undefined for navigator.webdriver in current and future documents."""
-    await context.add_init_script(script=_WEBDRIVER_INIT_SCRIPT)
-    # Persistent contexts can already have tabs and frames when launch returns.
-    # Init scripts only run for newly created or navigated documents.
-    for page in context.pages:
-        if page.is_closed():
-            continue
-        for frame in page.frames:
-            if frame.is_detached():
-                continue
-            try:
-                await frame.evaluate(_WEBDRIVER_INIT_SCRIPT)
-            except Exception as error:
-                # Restored tabs can close or navigate while startup is running.
-                # Future documents are already covered by the init script.
-                if (not page.is_closed() and not frame.is_detached()
-                        and "Execution context was destroyed" not in str(error)):
-                    raise
-    browser = getattr(context, "browser", None)
-    if browser is not None and not browser.is_connected():
-        raise RuntimeError("Brave disconnected during browser setup.")
-
-
 def find_brave(executable: str | None = None) -> str | None:
     candidates = [executable] if executable else ["brave-browser", "brave-browser-stable", "brave"]
     for candidate in candidates:
@@ -109,29 +77,26 @@ def prepare_profile_for_launch(profile: Profile) -> None:
     atomic_write(preferences, updated)
 
 
-def launch_options(executable: str, profile: Profile, headless: bool = False) -> dict:
-    args = ["--no-first-run", "--hide-crash-restore-bubble"]
-    if profile.profile_directory:
-        args.append(f"--profile-directory={profile.profile_directory}")
-    options = {
-        "executable_path": executable,
-        "user_data_dir": str(profile.user_data_dir),
-        "headless": headless,
-        "args": args,
-        # Imported profiles need the same desktop keyring as regular Brave.
-        # Playwright's test defaults otherwise make saved cookies unreadable.
-        "ignore_default_args": ["--password-store=basic", "--use-mock-keychain"],
-        "no_viewport": True,
-        # Playwright disables the Chromium sandbox by default; keep it enabled.
-        "chromium_sandbox": True,
-        # The runner owns signal handling and closes the active profile itself.
-        "handle_sigint": False,
-        "handle_sigterm": False,
-    }
-    # Brave is a system application. Virtual environments and packaged terminals
-    # can expose older GNOME schemas that crash GTK during visible startup.
-    # Scope this override to the browser; preserve display/session variables.
+def browser_environment() -> dict:
+    """Preserve the normal desktop/keyring session and use system GTK schemas."""
+    environment = dict(os.environ)
     schemas = Path("/usr/share/glib-2.0/schemas")
     if platform.system() == "Linux" and (schemas / "gschemas.compiled").is_file():
-        options["env"] = {**os.environ, "GSETTINGS_SCHEMA_DIR": str(schemas)}
-    return options
+        environment["GSETTINGS_SCHEMA_DIR"] = str(schemas)
+    return environment
+
+
+def native_command(executable: str, profile: Profile, *, proxy=None) -> list[str]:
+    """Launch the installed browser normally, without automation/debugging flags."""
+    command = [executable, f"--user-data-dir={profile.user_data_dir}", "--new-window"]
+    if profile.profile_directory:
+        command.append(f"--profile-directory={profile.profile_directory}")
+    if proxy:
+        from urllib.parse import urlsplit
+        url = urlsplit(proxy["server"])
+        if url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port or url.username or url.password:
+            raise ValueError("The native browser proxy must be an HTTP relay on 127.0.0.1.")
+        command += [f"--proxy-server={proxy['server']}", "--proxy-bypass-list=<-loopback>",
+                    "--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"]
+    command.append("about:blank")
+    return command

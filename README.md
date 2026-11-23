@@ -1,22 +1,20 @@
 # Zepuppeteer
 
-Zepuppeteer runs reusable **Python + Playwright web automations across groups of
-persistent Brave profiles**. Each profile keeps its own cookies and website
-sessions. A workflow opens one profile, executes its ordered tasks across the
-required websites, records the results, closes Brave, and continues to the next
-profile.
-
-The project uses the Brave executable installed on your machine, controlled over
-a local pipe. No separate Playwright browser download or exposed debugging port
-is required. The included workflow operates on a local HTML page so the complete
-pipeline can be tested without a website account or network connection.
+Zepuppeteer runs Python workflows across persistent Brave profiles using the
+visible screen. It starts the installed Brave executable as a normal OS process
+and uses screenshots, Tesseract OCR, image matching, and real mouse/keyboard
+input. Playwright, WebDriver, browser debugging connections, DOM queries and
+injected automation scripts are no longer used.
 
 ## Quick start
 
-Requires Python 3.10+ and a normal desktop user account. Run these commands from
-the repository root:
+Requires Python 3.10+, installed Brave, and a **Linux X11 desktop** running as a
+normal user. Keep the browser fully visible on the primary monitor. Wayland and
+`--headless` are unsupported. Use a dedicated desktop session while tasks run;
+manual mouse/keyboard activity can interrupt them.
 
 ```bash
+sudo apt-get install tesseract-ocr tesseract-ocr-eng xclip python3-venv
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
@@ -25,324 +23,125 @@ mkdir -p profiles/account-1/src profiles/account-2/src
 cp examples/profile.toml profiles/account-1/profile.toml
 cp examples/profile.toml profiles/account-2/profile.toml
 
-# Inspect exactly which profiles and tasks would run.
 python -m zepuppeteer run --group demo --workflow demo --dry-run
-
-# Execute the local demo without opening visible browser windows.
-python -m zepuppeteer run --group demo --workflow demo --headless
-
-# Inspect persisted results.
+python -m zepuppeteer run --group demo --workflow demo
 python -m zepuppeteer history
 ```
 
-Alternatively, use `uv sync --locked`, then prefix commands with `uv run`.
-`uv.lock` pins dependencies. Python 3.10 uses `tomli` for TOML parsing; newer
-Python versions use the standard library. On Ubuntu, install `python3-venv` if
-virtual environment creation is unavailable. The installed `zepuppeteer` command
-is equivalent to `python -m zepuppeteer`.
+Alternatively run `uv sync --locked` and prefix commands with `uv run`.
+`uv.lock` includes the screen dependencies. No automation browser or driver needs
+to be installed. The local demo uses a real HTML form and verifies its visible
+result after typing and clicking; it needs no website account or network.
 
-If Brave is missing, execution can install it through its official Ubuntu/Debian
-APT repository using sudo. The installer needs network access and may prompt for
-your sudo password. Pass `--no-install` to fail instead, or
-`--executable /path/to/brave-browser` to select an existing executable. Do not run
-the application itself as root. Headless execution needs no desktop display;
-visible execution requires DISPLAY or WAYLAND_DISPLAY.
+Brave can still be installed automatically from its official Ubuntu/Debian APT
+repository, using sudo. `--no-install` disables this and `--executable PATH`
+selects an installed executable. Desktop and OCR prerequisites are checked before
+installation. Preview, discovery, history, and `vpnCheck` do not require a desktop.
 
-Automated launches start the selected Brave profile with a blank page instead of
-restoring previous or pinned tabs. Before launch, its startup preference is set
-to New Tab and the pinned-tab startup list is cleared; cookies and saved logins
-are retained. Original preferences are saved once beside `Preferences` as
-`Preferences.before-zepuppeteer-startup`. This startup setting also applies to
-subsequent manual launches of that profile. Close Brave before running a workflow.
+## How buttons are located
 
-### Brave crashes on a missing GNOME settings key
+The controller identifies the browser window through the launched process group,
+brings it to the foreground, and captures its visible pixels. OCR returns labels
+and their bounding rectangles. Icon templates use OpenCV matching. A click uses
+the rectangle center translated to desktop coordinates. A second capture must
+confirm the same position before input. Duplicate matches fail instead of choosing
+an arbitrary button. Losing focus, moving the window after capture, or closing
+Brave stops input. PyAutoGUI's corner fail-safe remains enabled: move the pointer
+to a primary-screen corner to interrupt automation, or use Ctrl+C in the terminal.
 
-If startup reports `TargetClosedError` together with `font-antialiasing` or
-`Settings schema ... does not contain a key named 'antialiasing'`, Brave has
-crashed while initializing its Linux desktop UI, before workflow tasks run.
-A Python environment or packaged terminal can expose incompatible GNOME schemas.
-On Linux, the launcher uses `/usr/share/glib-2.0/schemas` for Brave when its
-compiled schema cache exists. This changes only the browser's environment and
-preserves the display and desktop session settings.
+Ordinary text controls need no fixed coordinates. Icon-only controls and precise
+notebook states need templates configured for your site's current appearance.
+Search regions are fractions of the **browser window**, including its toolbar:
+`[left, top, width, height]`, each from 0 to 1. Regions restrict recognition; they
+are not positions at which the code blindly clicks.
 
-Retry the original command after updating the code:
-
-```bash
-python -m zepuppeteer run --workflow colab --profile acc-5
-```
-
-## Moving this codebase to a server
-
-Use this checklist when moving from the development desktop to an Ubuntu/Debian
-server. There is no patched Brave binary to copy: the browser changes below are
-implemented in the Python launcher and are applied on the server at execution
-time. Browser profiles, login sessions, credentials, and OS services still need
-separate setup.
-
-### 1. Transfer the source and account configuration
-
-Copy or commit the latest source, `pyproject.toml`, `uv.lock`, and `config/`.
-A Git clone only transfers committed files. Transfer these ignored files
-separately when needed:
-
-| Location | What to do on the server |
-| --- | --- |
-| `profiles/<id>/profile.toml` | Copy each account's configuration, including its Brave display name, Google login username, notebook URL, and notebook name. |
-| `.env` | Recreate the Telegram bot token and destination chat, or set environment variables instead. Keep the real credentials out of Git. |
-| `~/.config/BraveSoftware/Brave-Browser/` | Recreate the named profiles on the server, or transfer browser data separately as described below. This directory is outside the repo. |
-| `profiles/<id>/src/` | Transfer only when using managed local browser data instead of `brave_browser_displayName`. |
-| `data/` and `artifacts/` | Optionally copy execution history and evidence after stopping active workflows. Old history may contain paths from the previous machine. |
-
-Rebuild `.venv` on the target; do not copy the desktop's virtual environment.
-Use the server account's own home directory rather than paths under the desktop
-user's home. The account must own and be able to write its profiles, history,
-artifacts, and browser preferences.
-
-### 2. Install the runtime and Brave
-
-Use a regular, non-root account for running the application. Install Python 3.10+
-and the native stable Brave package using
-[Brave's official Linux instructions](https://brave.com/linux/). Install Brave
-before unattended deployment; the launcher's automatic installer uses sudo and
-may prompt interactively.
-
-From the copied repository root, recreate the Python environment:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e .
-brave-browser --version
-```
-
-Alternatively, install `uv` on the server and run `uv sync --locked`. A separate
-`playwright install` browser download is not needed: this project uses installed
-Brave. Use `--executable /path/to/brave-browser` if it is not discoverable on PATH.
-
-### 3. Recreate or transfer the correct Brave profiles
-
-With `brave_browser_displayName` configured, discovery looks in the **server
-account's** `~/.config/BraveSoftware/Brave-Browser/Local State`. It does not use
-the copied repo's `src/` browser data for that account. Create a Brave profile
-with the exact configured display name, such as `AI-acc5`; the internal folder
-may be `Profile 1`, `Profile 2`, or another number on the new machine. The code
-resolves the name automatically. Keep `acc-5` as the repository folder ID.
-
-If transferring browser data, close Brave and stop workflows on both machines
-before taking a backup/copy. Preserve the user-data root's `Local State` together
-with the selected internal profile directories. Exclude the machine-specific
-`SingletonLock`, `SingletonSocket`, and `SingletonCookie` files from the copy;
-a copied lock referencing the old hostname can block startup. Never remove locks
-from a browser that is still running. Do not merge a copied profile over a live
-or unrelated server profile.
-
-**Copying the profile directory does not guarantee that Google login sessions
-will work on another machine.** The launcher preserves Brave's normal password
-store selection, but it does not transfer, create, or unlock the desktop keyring.
-Provide the appropriate keyring backend and user D-Bus session on the server,
-and plan to log in interactively again if the copied session is unreadable or
-expired. Chromium's backend selection and fallback behavior are documented in
-[Linux Password Storage](https://chromium.googlesource.com/chromium/src/+/main/docs/linux/password_storage.md).
-Do not add `--password-store=basic` or `--use-mock-keychain` as a migration workaround.
-
-### 4. Browser changes applied automatically on the server
-
-These behaviors are in `zepuppeteer/brave.py` and the runner; they do not need
-to be recreated manually through Brave's settings UI:
-
-| Change | Server behavior and persistence |
-| --- | --- |
-| Blank startup | Before launch, the selected profile's `Preferences` gets `session.restore_on_startup = 5`, `profile.exit_type = "Normal"`, and `pinned_tabs = []`. Previous/pinned tabs are not restored. Cookies and saved logins are retained. These preferences also affect later manual launches. |
-| Preference backup | Before the first change, the original file is saved beside it as `Preferences.before-zepuppeteer-startup`. The server creates its own backup; later launches do not overwrite it. |
-| Restore prompt | Launch arguments include `--no-first-run` and `--hide-crash-restore-bubble`. |
-| Profile selection | The launcher passes the resolved user-data root and `--profile-directory` for the selected profile. |
-| Desktop keyring | Playwright's `--password-store=basic` and `--use-mock-keychain` defaults are filtered out. The actual backend must still be available to the server user. |
-| GNOME schema fix | On Linux, if `/usr/share/glib-2.0/schemas/gschemas.compiled` exists, the browser receives `GSETTINGS_SCHEMA_DIR=/usr/share/glib-2.0/schemas`. This applies only to the launched process; no system schema file is patched. Install the server's normal desktop schema packages if needed rather than copying the desktop's compiled cache. |
-| Chromium sandbox | It stays enabled. Run as a normal user on a host that permits sandboxed Brave; do not run the workflow with sudo. |
-| Browser setup | The context installs the `navigator.webdriver` override for documents and tolerates tabs/frames closing or navigating during startup. |
-
-The selected browser data must be closed before launch. Profiles sharing a
-user-data root must run sequentially; do not schedule overlapping processes for
-that root. The project uses a local debugging pipe, so no inbound DevTools port
-needs to be exposed.
-
-### 5. Choose headless execution or provide an interactive desktop
-
-For a server without a display, use `--headless` for workflow execution. For
-initial Google login, MFA, runtime connection, or other manual attention, provide
-an interactive desktop session, such as a remote desktop, and open Brave as the
-same account that will run the workflow. A visible automated run needs a working
-`DISPLAY` or `WAYLAND_DISPLAY`; setting the variable alone does not create a
-display. Playwright also documents
-[headed execution with Xvfb](https://playwright.dev/python/docs/browsers#running-headed).
-
-A headless browser still needs access to the account's keyring/D-Bus session
-when saved credentials depend on it. A cron or service process does not
-automatically inherit the desktop session's environment. Configure the intended
-user, home directory, repository working directory, environment, and writable
-paths explicitly when adding a service. Scheduling is not built into this repo.
-
-### 6. Configure Colab and Telegram, then verify the migration
-
-The current Colab task reads these account-specific keys from
-`profiles/acc-5/profile.toml`:
+Add these tables to the relevant `profiles/<account>/profile.toml`:
 
 ```toml
-[profile]
-brave_browser_displayName = "AI-acc5"
+[settings.screen.targets.google_account]
+image = "icons/google-account.png"
+region = [0.7, 0.08, 0.3, 0.25]
+confidence = 0.9
 
-[profile.platforms.colab]
-login_username = "account@example.com"
-notebook_url = "https://colab.research.google.com/drive/YOUR_NOTEBOOK_ID"
-notebook_name = "your-notebook.ipynb"
-auto_connect = true
-job_start_timeout_seconds = 300
+[settings.screen.targets.colab_file]
+text = "File"
+region = [0.0, 0.08, 0.35, 0.25]
+
+[settings.screen.targets.colab_runtime]
+region = [0.5, 0.08, 0.5, 0.3]
+
+[settings.screen.targets.colab_saved]
+text = "All changes saved"
+region = [0.0, 0.08, 1.0, 0.25]
 ```
 
-Use the actual Google account and exact notebook name shown by Colab. The current
-login/runtime selectors expect English account/connection labels. A connected
-Colab runtime is remote service state, not a local Brave preference that can be
-copied. The task checks the selected account, notebook name, and runtime
-connection. With `auto_connect = true`, it opens Additional connection options,
-selects Connect to a hosted runtime, and waits up to 300 seconds for a connection.
-An already connecting runtime is given time to finish without another request.
-Once connected, it clicks Run all and waits for the last code cell to start
-executing. Resolve `NeedsAttention` in the server's interactive session and
-retry as needed.
+Create an image template by cropping a screenshot tightly around the intended
+icon. Save the PNG beside the account configuration, e.g.
+`profiles/<account>/icons/google-account.png`. Template paths resolve relative to
+`profile.toml`. Use the same browser zoom, desktop scaling, and theme as the
+capture. Change the example regions for your own layout. An unconfigured or
+unrecognized icon produces an actionable error and failure evidence.
 
-Recreate `.env` at the copied repository root:
+Available target overrides include:
 
-```dotenv
-telegram_bot_token="your-bot-token"
-telegram_chat_id="your-chat-id"
-```
+| Target | Purpose |
+| --- | --- |
+| `google_account` | Google account avatar button; image required when it has no readable label |
+| `google_active_account` | Region containing the account popup's active email at the top |
+| `colab_toolbar`, `colab_runtime` | Regions containing the menu bar and runtime toolbar status |
+| `colab_runtime_connected`, `colab_runtime_disconnected`, `colab_runtime_connecting`, `colab_runtime_restarting` | Optional image/text targets for runtime state |
+| `colab_connection_options` | Additional connection options icon |
+| `colab_file`, `colab_save`, `colab_insert`, `colab_run_all`, `colab_connect_hosted` | Optional text/image overrides for menu controls |
+| `colab_saved` | Visible saved-state label or image used after saving |
+| `colab_first_cell_editor` | A distinctive anchor that focuses the first cell's editor |
+| `colab_new_cell`, `colab_delete_cell` | Inserted cell and its delete icon, for keepAlive tasks 3/4 |
+| `colab_last_cell_anchor` | Distinctive visible content identifying the final code cell |
+| `colab_notebook_idle` | Visible toolbar state proving no execution is already underway |
+| `colab_last_cell_running` | Executing indicator in a tight region around the final code cell |
+| `colab_last_cell_output` | Region containing only that cell's visible output |
+| `colab_resources` | Region containing only the open runtime resources panel |
+| `kaggle_account` | Kaggle account avatar/menu button |
+| `kaggle_profile` | Your Profile entry in the account menu |
+| `kaggle_toolbar`, `kaggle_runtime` | Regions containing the notebook toolbar and session status |
+| `kaggle_session_options`, `kaggle_session_status` | Optional session menu icon and menu status region |
+| `kaggle_runtime_connected`, `kaggle_runtime_disconnected`, `kaggle_runtime_connecting` | Optional image/text targets for session state |
 
-Alternatively, set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` for the server
-process; these override `.env`. Allow outbound HTTPS to Telegram and the Google
-services used by Colab. Copy any required proxy environment settings separately;
-they are not supplied by the browser profile. A task's `NeedsAttention` sends an
-alert with its profile, platform, and description. Look for
-`Telegram alert accepted (message ID: ...)` in the terminal; HTTP/network errors
-are reported separately without replacing the task failure.
+OCR reads visible English UI. It cannot recover hidden/off-screen DOM text,
+HTTP response codes, or inaccessible cell IDs. Output reads and quota reads are
+restricted to configured regions. Adapt the regions or templates when a website
+changes. Colab and Kaggle account workflows still require a manual initial login.
 
-Run these checks from the server repository root:
+## Browser lifecycle and server setup
 
-```bash
-source .venv/bin/activate
-python -m zepuppeteer profiles --profile acc-5
-python -m zepuppeteer run --workflow colab --profile acc-5 --dry-run
-python -m zepuppeteer run --workflow colab --profile acc-5 --headless
-python -m zepuppeteer history
-```
+Profiles run one at a time. Normal launch arguments select the user-data root,
+internal profile, and a new blank window. There are no automation/debugging flags
+or modifications to `navigator.webdriver`. The normal desktop password store and
+keyring are preserved. Close Brave using the selected user-data root before
+starting; live profiles are never edited or attached to.
 
-Confirm discovery reports the server's intended `user_data_dir`, internal
-`profile_directory`, and `browser_display_name`. Dry run validates discovery and
-the workflow plan; it does not prove login, keyring access, runtime connection,
-or Telegram delivery. Verify a real run and inspect Telegram and failure evidence
-before enabling unattended execution.
+The existing blank-startup preference preparation is retained: the selected
+profile's startup preference becomes New Tab and pinned startup tabs are cleared,
+while cookies and logins remain. The original Preferences file is backed up once
+as `Preferences.before-zepuppeteer-startup`. On Linux the browser inherits the
+desktop session environment and uses installed system GTK schemas when present.
+
+For a server, provide an X11 desktop (or a dedicated Xvfb display), its clipboard
+backend, and Tesseract. Simply setting DISPLAY does not create a display. Rebuild
+the Python environment and install Brave on the target. Transfer ignored profile
+configuration, browser data, VPN files, and `.env` separately from Git. Named
+Brave profiles resolve in the server account's own Brave configuration directory.
+Cookies may need a new manual login if the desktop keyring is unavailable or
+machine-specific. Preserve Local State with transferred internal profile data,
+and never copy browser data over a running or unrelated profile.
 
 ## Architecture
 
-The main concepts are deliberately separate:
-
-| Concept | Responsibility | Example |
-| --- | --- | --- |
-| Profile | Stable account identity, browser data, tags, settings | `account-1` |
-| Group | Named collection of profile directory names | `demo` |
-| Website adapter | A site's selectors, login checks, and navigation | `websites/demo.py` |
-| Task | One operation with a verified result | `demo.fill_form` |
-| Workflow | Ordered steps, inputs, parameters, and execution rules | `config/workflows/demo.toml` |
-| Runner | Browser lifecycle, timeouts, retries, failure isolation | `runner.py` |
-| State store | Durable run, profile, and step results | `data/runs.sqlite` |
-
-```mermaid
-flowchart TD
-    CLI[CLI] --> Profiles[Discover and select profiles]
-    CLI --> Plan[Load workflow and resolve task modules]
-    Profiles --> Runner[Sequential workflow runner]
-    Plan --> Runner
-    Runner --> Browser[One persistent Brave context per profile]
-    Browser --> Tasks[Ordered task functions]
-    Tasks --> Sites[Website adapters]
-    Tasks --> Outputs[Outputs passed to later steps]
-    Runner --> State[SQLite execution history]
-    Runner --> Artifacts[Task files and failure evidence]
-```
-
-The execution sequence is:
-
-1. Discover profiles, read optional metadata, and apply the selection filters.
-2. Parse the workflow and validate step IDs, dependencies, timeout values, retry
-   declarations, task modules, and async function signatures.
-3. In a dry run, print the plan and exit before creating history, artifacts, or a
-   browser. Task modules are imported during validation, so keep module-level code
-   free of side effects. Configuration and task code are trusted local inputs.
-4. Check the execution environment and locate or install Brave.
-5. Create a history record with pending entries for every selected profile and
-   step. Open a persistent browser context for the first profile.
-6. Run its tasks in order, pass declared outputs to dependent steps, and commit
-   each result to SQLite. All websites in that workflow use this same profile's
-   browser context.
-7. Close the browser, record the profile outcome, and continue according to the
-   workflow's failure policy. Print a run summary when execution finishes.
-
-Profile-specific differences belong in metadata. Website-specific selectors
-belong in website adapters. Task functions perform the work; the runner owns
-execution policy and browser cleanup. A task implementation is shared by every
-profile that runs it.
-
-## Repository layout
-
-```text
-config/
-  groups.toml                  # Named profile selections
-  workflows/
-    demo.toml                  # Runnable two-step workflow
-    colab.toml                 # Open and inspect Google Colab notebooks
-    kaggle.toml                # Open and inspect Kaggle notebook editors
-examples/
-  profile.toml                 # Optional profile metadata template
-  demo_task.py                 # Original single-file task example
-zepuppeteer/
-  __main__.py                  # python -m zepuppeteer entry point
-  cli.py                       # Commands, validation, environment setup
-  config.py                    # TOML reading and JSON compatibility checks
-  models.py                    # Profile, Workflow, Step, TaskContext, TaskResult
-  profiles.py                  # Browser data discovery and profile selection
-  workflows.py                 # Workflow schema and task module resolution
-  brave.py                     # Brave lookup, installation, launch options, init script
-  runner.py                    # Workflow and legacy task execution
-  notifications.py             # Telegram alerts for NeedsAttention failures
-  state.py                     # SQLite history and read-only queries
-  profile_transfer.py          # Existing verified profile import/export logic
-  websites/
-    demo.py                    # Selectors and interactions for the local demo
-    colab.py                   # Colab navigation, readiness, and access checks
-    kaggle.py                  # Kaggle navigation, readiness, and access checks
-  tasks/
-    demo/
-      fill_form.py             # Submit a form; save and return a report
-      verify_result.py         # Consume and verify the preceding task's report
-    colab/
-      open_notebook.py         # Open a notebook; save screenshot and metadata
-    kaggle/
-      open_notebook.py         # Verify a notebook's account, name, and session
-scripts/                       # Profile transfer and password utility entry points
-src/utils.py                   # Existing AES-GCM password helpers used by scripts
-profiles/                      # Local account metadata and Brave data; ignored by Git
-data/                          # Local SQLite history; ignored by Git
-artifacts/                     # Local task output and evidence; ignored by Git
-.env                           # Local Telegram credentials; ignored by Git
-tests/                         # Unit tests and disposable-browser integration tests
-pyproject.toml                 # Package, Python version, dependencies, console command
-uv.lock                        # Resolved dependency versions
-```
-
-`profiles/`, `data/`, and `artifacts/` are runtime directories, created as needed.
-Create profile metadata explicitly with `createProfile` or by copying the example
-TOML; installing the project leaves existing profile metadata untouched.
-Configuration files and examples live in this checkout; when running from another
-working directory, supply the appropriate directory/path flags.
+`brave.py` discovers Brave and constructs native launch commands. `screen.py`
+owns the OS window, screenshots, recognition, clipboard input, and browser
+process. Website adapters use these screen operations. Tasks return verified
+`TaskResult` values; the runner owns sequential profiles, retries, timeouts,
+cleanup, SQLite history, and failure evidence. VPN tools and profile transfer
+utilities remain separate from the screen controller.
 
 ## Profiles and browser data
 
@@ -479,7 +278,7 @@ described above remains the default.
 Use `brave://version` to check the active **Profile Path**, or Brave Settings →
 **Profile name and icon** to check the displayed name. The launcher preserves
 Brave's desktop keyring so imported cookies and saved sessions remain readable;
-Playwright's basic password store and mock keychain defaults are filtered out.
+The native browser launch uses Brave's normal password store and keychain.
 
 Two older layouts remain supported:
 
@@ -581,41 +380,10 @@ Python coroutine; it cannot undo an action already accepted by a website.
 
 ## Google Colab task
 
-`colab.open_notebook` is the first real-website task. Its implementation is
-`zepuppeteer/tasks/colab/open_notebook.py`, with website navigation in
-`zepuppeteer/websites/colab.py` and a ready-to-use workflow at
-`config/workflows/colab.toml`.
+Start from `examples/colab_profile.toml` for the full account and screen-target
+configuration, then capture its icon PNGs from your own desktop.
 
-For each selected profile it opens a notebook in a new tab, waits for the editor
-and title, verifies the Google account and configured notebook name, and checks
-that the notebook is connected to a runtime. With `auto_connect = true`, a
-disconnected notebook uses Additional connection options → Connect to a hosted
-runtime and waits up to 300 seconds for connected indicators. If a connection is
-already in progress, it waits without submitting another request. With
-`auto_connect = false` (the default), a missing connection requires attention.
-
-After connection, the task clicks Run all once and waits for the last **code**
-cell's running indicator, including when the runtime was already connected.
-An earlier running cell, a queued final cell, and saved output are not accepted
-as proof that the main job started. Existing running or queued cells cause
-`NeedsAttention` before clicking, so a previous job is not restarted accidentally.
-`job_start_timeout_seconds` controls this wait and defaults to 300 seconds.
-
-The task then closes its tab; the runner closes the profile when its workflow
-finishes. It confirms job startup, not completion, and does not maintain a browser
-connection or guarantee the job continues after closure. The included Colab
-workflow allows 900 seconds per attempt to accommodate navigation, verification,
-runtime startup, and earlier cells reaching the final job. Increase the workflow
-timeout as well if increasing the job-start wait beyond that budget.
-
-```bash
-python -m zepuppeteer run --workflow colab --dry-run
-python -m zepuppeteer run --workflow colab --profile acc-5
-python -m zepuppeteer run --workflow colab --profile acc-5 --headless
-```
-
-The current task reads its URL, account, and expected notebook name from this
-table in the account's `profile.toml`:
+Configure the account in its `profile.toml`:
 
 ```toml
 [profile.platforms.colab]
@@ -623,88 +391,54 @@ login_username = "account@example.com"
 notebook_url = "https://colab.research.google.com/drive/YOUR_NOTEBOOK_ID"
 notebook_name = "your-notebook.ipynb"
 auto_connect = true
-use_vpn = true
+use_vpn = false
 job_start_timeout_seconds = 300
 ```
 
-With `use_vpn = true`, the runner connects the account's `profile.vpn` before
-launching Brave, and the task requires a live VPN before opening its notebook.
-WireGuard uses `wireguard_file` (relative to `profile.toml` or absolute); V2Ray
-uses `v2ray_link`. Both run an authenticated Xray HTTP proxy on an ephemeral
-`127.0.0.1` port that only the launched Brave profile uses. The connection stays
-alive until the browser closes.
-Omitting `use_vpn`, or setting it to `false`, leaves VPN setup disabled.
+The task opens the notebook through the address bar, waits for its visible Runtime
+menu and loaded OS window title, opens the configured Google account avatar, and
+waits for the top email in the popup. The name must match exactly without ` - Colab`.
+An unavailable account icon, unknown account, wrong title, or unrecognized runtime
+requires attention. Existing runtime status is read only from its toolbar region.
 
-Colab VPN connections require `xray` and `curl` on PATH for either protocol.
-Install a current Xray release using the official
-[Xray installation instructions](https://github.com/XTLS/Xray-install), and check
-that `xray version` works before running the workflow. The workflow does not
-install VPN tools automatically.
+When disconnected and `auto_connect=true`, the configured connection-options icon
+opens the menu and OCR locates Connect to a hosted runtime. The task waits up to
+300 seconds for connected indicators. An in-progress connection is waited for
+without submitting another request. Following a new connection it clicks Run all
+once and checks a configured final-cell executing indicator. Configure the
+`colab_notebook_idle`, `colab_last_cell_anchor`, and `colab_last_cell_running`
+targets, each with a tight region, before starting work. The controller requires
+the idle signal and final-cell anchor before clicking and rechecks the final-cell
+anchor afterward. Missing targets prevent Run all. It verifies startup rather
+than eventual job completion.
 
-For WireGuard, Xray reads the existing connection file's keys, addresses, MTU,
-AllowedIPs and peer settings into its userspace
-[WireGuard outbound](https://xtls.github.io/en/config/outbounds/wireguard.html).
-It explicitly sets `noKernelTun = true`, so the browser connection needs no
-`wg-quick`, kernel WireGuard interface, or sudo authorization. Host routes and
-`/etc/resolv.conf` stay unchanged, keeping Codespaces, GNOME and other
-applications on their existing network connection. Configured DNS server IPs
-become Xray's `remoteDNS` for website lookups through the tunnel; when absent,
-the workflow uses `1.1.1.1` and `1.0.0.1` through the tunnel. The source connection
-file is preserved, and shell hooks, `Table`, `ListenPort`, `FwMark` and
-`SaveConfig` are ignored.
+An already connected runtime follows keepAlive task 5 without restarting the
+job. That action requires `colab_first_cell_editor` and `colab_saved`. It copies
+the focused editor through the clipboard, preserves source through the
+`# Status update` comment, replaces the following status comment, re-reads the
+editor to verify the change, and saves through File > Save. A missing marker
+prevents edits. No `exit()` terminates the workflow runner.
 
-The proxy has no direct outbound fallback. Brave disables QUIC and restricts
-non-proxied WebRTC UDP because its HTTP proxy carries TCP traffic. Xray validates
-the generated configuration before launch. Temporary configuration files have
-mode 600, contain the VPN keys and proxy credentials, and are removed with the
-proxy process on completion, failure or cancellation. Startup diagnostics redact
-VPN keys and proxy credentials. The standalone WireGuard `vpnCheck` command
-below uses a separate namespace implementation and has different dependencies.
+The helper actions can save, open resources, insert/delete a scratch cell, or
+update the status comment. Configure their targets from the table above before
+using them. Visible output is OCR text; scrolling to the end does not read hidden
+iframes or off-screen cell output. Both tasks save a verified screenshot and
+JSON metadata before closing the tab. Outputs include the notebook title/URL,
+verified account/runtime state, and `screenshot_path`/`metadata_path`. The runner
+then closes Brave. Failure leaves the tab available for evidence collection.
 
-An HTTPS heartbeat must succeed through the VPN before launch and before Run all.
-While a task runs, the runner repeats the heartbeat every 15 seconds and cancels
-the task with `NeedsAttention` if it fails or the proxy process exits. The
-heartbeat goes through the same authenticated proxy as Brave. A missing
-connection, heartbeat, or required VPN setup raises
-`NeedsAttention` and uses the normal attention notification path. Calling the
-Colab task directly with `use_vpn = true` requires the runner-provided VPN session.
-
-`notebook_name` must match the title exactly, excluding the trailing ` - Colab`.
-Use `notebook_url`, not the older `worker_url` key. The current implementation
-does not use `params.notebook_url`, `settings.colab.notebook_url`, or a public
-notebook fallback to select the URL; older template/workflow comments describing
-those options do not apply to this version of the task. HTTPS Colab URLs are
-accepted, including Drive/GitHub notebook paths, account-selection queries such
-as `?authuser=1`, and cell fragments. Other hosts and URL credentials are rejected.
-
-A sign-in/consent redirect, access restriction, blocking dialog, wrong/unverified
-Google account, mismatched notebook name, unavailable connection menu, or runtime
-that remains disconnected/unverified after the connection wait raises
-`NeedsAttention`. The runner sends a Telegram alert when configured;
-open the profile manually, resolve the prerequisite, close Brave, and retry.
-Login is not automated. Editor readiness is based on structural roles and the
-notebook title. Login and runtime checks use English UI labels; website UI
-changes or a different language may require updating the selectors. The login
-and initial runtime checks each wait up to 15 seconds; after requesting or
-observing an in-progress connection with `auto_connect`, the runtime wait is up
-to 300 seconds. If the last code cell never starts, the job-start wait also
-raises `NeedsAttention`; inspect earlier cells for errors or input requests.
-Blocking consent/quota dialogs or other manual prerequisites require attention;
-the task does not automatically accept them.
-
-The successful result has `status="success"` and outputs `job_started=true`
-and `last_cell_id`. It does not produce a success screenshot or `notebook.json`.
-The runner still collects screenshots, error details, and traces on failure.
-Success verifies the account, notebook name, runtime connection, and that the
-last code cell started executing; it does not verify the job's eventual result.
+With `use_vpn=true`, configure `[profile.vpn]` as below and install `xray` and
+`curl`. The runner connects before Brave launches. WireGuard and V2Ray both use
+a userspace Xray HTTP proxy without modifying host routes or DNS. A short-lived
+loopback relay adds upstream authentication for the normal browser; credentials
+are never passed in browser arguments. Heartbeats use the authenticated upstream
+before launch, before Run all, and every 15 seconds during task execution. A
+failed heartbeat cancels work. The browser closes before the relay and VPN.
+QUIC and non-proxied WebRTC UDP are disabled while using that proxy.
 
 ## Kaggle task
 
-`kaggle.open_notebook` follows the Colab task structure: the task is in
-`zepuppeteer/tasks/kaggle/open_notebook.py`, navigation is in
-`zepuppeteer/websites/kaggle.py`, and `config/workflows/kaggle.toml` runs it.
-
-Configure each account's `profile.toml` with:
+Use `examples/kaggle_profile.toml` for account settings and screen targets.
 
 ```toml
 [profile.platforms.kaggle]
@@ -713,38 +447,19 @@ notebook_url = "https://www.kaggle.com/code/your-kaggle-username/your-notebook/e
 notebook_name = "Your Notebook"
 ```
 
-`login_username` is the Kaggle handle from your profile URL, rather than the
-email used to sign in. The task verifies the account menu's profile link; a
-notebook author's profile link is not proof of the active account. Notebook names
-must match the page title exactly, excluding an optional ` | Kaggle` or
-` - Kaggle` suffix. Use the displayed title, rather than the URL slug.
-
-```bash
-python -m zepuppeteer run --workflow kaggle --profile acc-5 --dry-run
-python -m zepuppeteer run --workflow kaggle --profile acc-5
-python -m zepuppeteer run --workflow kaggle --profile acc-5 --headless
-```
-
-The task reads those three values from `[profile.platforms.kaggle]`; it skips
-profiles without that table. Workflow parameters and `settings.kaggle` do not
-override them. HTTPS notebook URLs on `kaggle.com` and `www.kaggle.com` are
-accepted, and a missing `/edit` suffix is added while preserving the query and
-fragment. The configured account must already have access to the existing editor.
-See [Kaggle's notebook documentation](https://www.kaggle.com/docs/notebooks) for
-the service's notebook interface.
-
-The task opens a new tab, waits for the editor's Save Version control and code
-editor, then checks the account, notebook title, and running session. Sign-in or
-verification, blocking dialogs, unsuitable account/name/session state, and
-restricted access raise `NeedsAttention`, using the runner's existing Telegram
-notification and failure evidence handling. It leaves the tab open on failure
-and closes it on success, returning `status="success"` with `outputs={}`.
-
-Login and session checks each wait up to 15 seconds and use English accessible
-labels. Unrecognized UI returns an unverified state and requires attention.
-These selectors have local DOM-fixture coverage; a signed-in Kaggle notebook
-has not been used for end-to-end verification. The task does not sign in, start
-sessions, edit or execute cells, or save notebook versions automatically.
+Configure `kaggle_account` for the account menu icon. The task opens the existing
+editor, waits for visible Save Version text, follows the account menu's Your
+Profile link, waits for navigation, and verifies the signed-in handle from the
+address bar. It then returns to the notebook and checks the native window title
+and visible session status. If the
+status is inside a session menu, configure `kaggle_session_options` and
+`kaggle_session_status`; it opens that menu to read the state and closes it with
+Escape. Runtime states can also use the optional image targets in the table above.
+Profiles without this platform table are skipped. The task does not log in,
+start a session, execute cells, or save a notebook version. The browser tests
+execute both site tasks against local notebook fixtures using real mouse clicks,
+keyboard navigation, and OCR. They do not use signed-in live
+service accounts.
 
 ## VPN connectivity task
 
@@ -829,170 +544,65 @@ profile's manifest and accepts `timeout` and `url` in `[steps.params]`.
 
 ## Writing tasks and website adapters
 
-To add a website, create its adapter under `zepuppeteer/websites/`, then create a
-package under `zepuppeteer/tasks/<site>/` with an `__init__.py` and task modules.
-Put reusable login checks, selectors, and navigation in the adapter. Use
-Playwright's role/label locators and explicit result checks there. Keep workflow
-failure policy and browser launching in the runner.
-
-Every workflow task exposes this contract:
+Workflow modules define `async def run(ctx: TaskContext) -> TaskResult`. Use the
+screen API exposed by `ctx.browser`:
 
 ```python
-from zepuppeteer.models import NeedsAttention, TaskContext, TaskResult
-from zepuppeteer.websites.my_portal import MyPortal
+from zepuppeteer.models import TaskResult
 
-
-async def run(ctx: TaskContext) -> TaskResult:
-    # MyPortal is your site's adapter; implement these methods for the real site.
-    settings = ctx.profile.settings["my_portal"]
+async def run(ctx):
     page = await ctx.browser.new_page()
-    portal = MyPortal(page, base_url=settings["base_url"])
-    await portal.open()
-    if not await portal.is_logged_in():
-        raise NeedsAttention("Log in to my_portal before running this profile.")
-    report_path = await portal.export_report(
-        period=ctx.params["period"], destination=ctx.artifact_dir
-    )
-    await portal.verify_report(report_path)
+    await page.goto("https://example.com")
+    await page.click_text("Name", region=(0, 0.1, 1, 0.7))
+    await page.fill_text(ctx.profile.name)
+    await page.click_target("submit", text="Apply")
+    await page.wait_for_text("Saved")
+    await page.screenshot(path=str(ctx.artifact_dir / "saved.png"))
     await page.close()
-    return TaskResult(outputs={"report_path": str(report_path)})
+    return TaskResult(outputs={"saved": True})
 ```
 
-This example illustrates a custom adapter; `MyPortal` is not included. The working
-reference is `tasks/demo/fill_form.py` together with `websites/demo.py`.
+`fill_text(text)` verifies a focused field through Select All and Copy after pasting.
+Other operations include `type_text(text)` for insertion, `read_text(region)`, `words(region)`,
+`wait_for_target(name)`, `hotkey("ctrl", "s")`, `press("enter")`, `scroll(-5)`,
+`current_url()` (copies the address bar), and `title()` (native window title).
+Ordinary single-line ASCII input uses real keystrokes; multiline/Unicode input
+uses the clipboard. Clipboard text is restored after reads and pastes. Tasks must await a visible
+result after an action before reporting success. A click alone is not proof.
+Only one automation tab should be operated at a time. Do not change tabs or use
+the desktop while an automated task is active.
 
-`TaskContext` provides:
+Legacy files still define `async def run(context, profile)`. Run the converted
+example with:
 
-- `browser`: the current profile's Playwright `BrowserContext`.
-- `profile`: its name, browser data paths, enabled flag, tags, and settings.
-- `params`: a fresh copy of this step's parameters.
-- `inputs`: a fresh copy of the declared earlier step's output dictionary.
-- `artifact_dir`: an existing, unique directory for this attempt's files.
-- `run_id` and `step_id`: identifiers for diagnostics and saved outputs.
-
-Return `TaskResult(outputs={...}, message="...")` after verifying success. Outputs
-must be dictionaries containing JSON-compatible values; convert paths to strings.
-Dates, bytes, NaN, and arbitrary Python objects are rejected. Return
-`TaskResult(status="skipped", message="Nothing to export")` when there is no work.
-Raise an exception on failure. `NeedsAttention` marks a manual prerequisite such
-as an expired session or MFA and is never retried, even when retries are enabled.
-
-When a workflow task raises `NeedsAttention`, the runner sends a Telegram alert
-with the profile ID (and Brave display name when configured), platform, and
-description. The platform is the first component of the task name, such as
-`colab` for `colab.open_notebook`. Successful tasks and ordinary failures do not
-send attention alerts.
-
-Configure the bot in `.env` at the repository root:
-
-```dotenv
-telegram_bot_token="your-bot-token"
-telegram_chat_id="your-chat-id"
+```bash
+python -m zepuppeteer --profiles-dir ./profiles --task ./examples/demo_task.py
 ```
 
-`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` environment variables take precedence
-over `.env`. Telegram requests have a 10-second network timeout and run outside
-the async event loop. Notification failures are logged without changing the
-original task failure. The `.env` file is ignored by Git.
-Accepted sends print Telegram's message ID so delivery attempts are visible in
-the terminal.
-
-Tasks must await their work and cooperate with cancellation. Close task-owned
-pages after success; leaving a failing page open lets the runner capture it.
-The runner closes the whole context after the profile finishes. Tasks should not
-close that shared context or launch a second instance of the same profile.
+`context` is now a `ScreenBrowser`; existing custom Playwright tasks must be
+ported to the operations above. The runner API is now
+`run_profiles(profiles, executable, task=None)` or
+`run_workflow(profiles, executable, workflow, tasks, state, ...)` with no driver
+argument. `--headless` produces an explicit error.
 
 ## Failures, history, and artifacts
 
-A failed required step stops the current profile's workflow and marks its
-remaining steps skipped. The default `continue` policy runs the next profile;
-`stop` also marks unstarted profiles skipped. A task that deliberately returns
-`skipped` skips later steps that require its output, while independent subsequent
-steps may still run. A profile with no failed steps counts as successful even if
-some or all steps were deliberately skipped.
+Workflow execution records run/profile/step status and JSON outputs in SQLite.
+Declared retry-safe steps can retry within their configured limits;
+`NeedsAttention` is not retried. Ctrl+C cancels the active work and closes the
+browser before advancing. Browser launch and cleanup failures are recorded.
 
-Each attempt gets a directory under:
+On failure the runner attempts window screenshots and `failure.json`. The
+`trace.zip` filename is retained for compatibility, but now contains start/end
+PNG screenshots and metadata. It is a screen evidence archive, not a Playwright
+trace and cannot be opened in the Playwright trace viewer. `--no-trace` disables
+these archives. Screenshots can contain private visible account/notebook data;
+`artifacts/` stays ignored by Git.
 
-```text
-artifacts/<run-id>/<profile>-<hash>/<step>-<hash>/attempt-1/
-```
-
-Filesystem components are sanitized and include a short hash to prevent name
-collisions. Task files can be retained on success. Failed attempts also retain a
-`failure.json` with the error and open-page URLs, screenshots of up to five open
-pages, and a Playwright `trace.zip` when tracing is available. Browser launch/setup
-errors are recorded at the profile directory. Evidence collection is best effort:
-its failure does not replace the task's original error. Successful attempt traces
-are discarded; `--no-trace` disables trace recording. Task timeouts cover the task
-coroutine; launch, cleanup, evidence capture, and retry delays are separate.
-
-SQLite stores three levels of history:
-
-| Table | Recorded information |
-| --- | --- |
-| `runs` | Workflow name, run ID, status, UTC timestamps, artifact root |
-| `profile_runs` | Each selected profile's status, timestamps, and failure |
-| `step_runs` | Task/step IDs, status, attempt count, latest attempt directory, outputs, message, error |
-
-Writes are committed after each transition. A step row holds its final result and
-attempt count; earlier failed attempts remain in their artifact directories.
-Run statuses are `running`, `success`, `failed`, or `cancelled`. Profile/step
-entries also use `pending` and `skipped`. Summary `skipped` counts unstarted
-profiles; inspect step details for individual skipped tasks.
-
-```bash
-python -m zepuppeteer history --limit 10
-python -m zepuppeteer history --run-id RUN_ID
-python -m zepuppeteer history --state-db /path/to/runs.sqlite
-python -m zepuppeteer run --workflow demo --state-db ./data/demo.sqlite --artifacts-dir ./artifacts
-```
-
-History opens an existing database read-only. An absent database returns an empty
-history list. A normal run exits with status 0 when selected profiles succeed and
-1 if any profile fails. Invalid arguments use argparse's status 2. Ctrl+C or
-SIGTERM cancels active work, closes its browser, records cancellation where
-possible, and exits with status 130. Forced termination or power loss can leave
-`running` entries; history is not proof that an interrupted website action did
-not happen.
-
-To investigate a failure, inspect its history and evidence, fix the cause, and use
-`--profile` to select the affected account for a new run. A new run starts the
-workflow from its first step. Automatic resume, failed-step replay, parallel
-workers, and built-in scheduling are not implemented. The state store provides
-the foundation for adding those later without mixing them into task code.
-
-Browser data, history outputs, downloads, screenshots, and traces can contain
-account information. They are ignored by Git, retained locally without automatic
-cleanup, and should be handled like the underlying account data.
-
-## Existing launcher and single-file tasks
-
-The original commands and `run(context, profile)` task contract remain available:
-
-```bash
-# Open profiles in sequence; close each window to advance.
-python -m zepuppeteer --profiles-dir ./profiles
-
-# Preview discovery without opening or installing a browser.
-python -m zepuppeteer --profiles-dir ./profiles --dry-run
-
-# Run the original local interaction example on every enabled profile.
-python -m zepuppeteer --profiles-dir ./profiles --task ./examples/demo_task.py --headless
-```
-
-Legacy tasks define `async def run(context, profile)` in a Python file. `context`
-is a Playwright persistent `BrowserContext`. The runner owns browser lifecycle,
-closes it after the task, and stops at the first failure. Legacy execution does
-not use workflow history, retries, or failure artifacts. Headless legacy mode
-requires a task, except for a dry run. Existing imports of `Profile` and
-`discover_profiles` from `zepuppeteer.brave`, and `run_profiles` from
-`zepuppeteer.cli`, remain supported.
-
-Browser setup continues to make `navigator.webdriver` return `undefined` in new
-documents, tabs, frames, and popups. Existing documents are updated before tasks
-run, but scripts that ran in restored tabs before setup cannot be changed
-retroactively. This does not provide antidetect guarantees. Brave is a custom
-Playwright executable, so compatibility can vary with browser updates.
+`NeedsAttention` uses the existing best-effort Telegram notification when
+configured via `.env` (`telegram_bot_token`, `telegram_chat_id`) or the overriding
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` environment variables. Credentials
+are not included in error messages.
 
 ## Profile transfer and password utilities
 
@@ -1030,29 +640,73 @@ original system keyring; transfer does not decrypt or migrate keyring secrets.
 
 ```bash
 python -m unittest discover -s tests -v
+
+# Opt in only on a disposable X11 desktop: tests move the mouse and type.
+ZE_SCREEN_TESTS=1 python -m unittest discover -s tests -p "test_*screen_browser.py" -v
 ```
 
-Tests exercise legacy compatibility, all profile layouts, imported internal
-profile selection, metadata and group filtering, workflow schema validation,
-output handoff, timeouts, retry declarations and attempts, skipped dependencies,
-failure policies, cancellation including browser cleanup, JSON output validation,
-SQLite history, and dry-run side effects. Installer tests mock APT commands.
-Transfer tests verify copying, replacement, rollback, metadata preservation, and
-running-browser checks.
+Unit coverage includes OCR coordinate conversion, template matching, duplicate
+matches, stale positions, focus checks, normal process launch, profile storage,
+workflow history, retries/cancellation, screen site actions, and VPN handling.
+The integration tests use disposable profiles and local pages for form typing,
+clicking, persistence, and failure screenshots. They never use real accounts.
 
-When Brave and Playwright are installed, integration tests also run the demo
-workflow on two disposable profiles, check real failure screenshots/traces, and
-verify `navigator.webdriver` across pages, frames, popups, reloads, and navigation.
-They use temporary browser data and local/intercepted pages; they never use the
-repository's account sessions. These tests need an environment that permits
-launching sandboxed Brave; they are skipped if Brave or Playwright is absent.
-Colab tests cover URL/configuration validation, profile overrides, saved artifacts,
-delayed/localized editors, sign-in redirects, permission dialogs, HTTP failures,
-and incomplete editor shells. Automated Colab browser tests intercept requests
-with local fixtures and do not depend on Google's availability.
+Implementation references: [PyAutoGUI](https://pyautogui.readthedocs.io/en/latest/),
+[MSS](https://python-mss.readthedocs.io/latest/), and
+[pytesseract](https://github.com/madmaze/pytesseract).
 
-Useful references: [Playwright Python](https://playwright.dev/python/docs/library),
-[persistent browser contexts](https://playwright.dev/python/docs/api/class-browsertype#browser-type-launch-persistent-context),
-[locators](https://playwright.dev/python/docs/locators),
-[tracing](https://playwright.dev/python/docs/api/class-tracing), and
-[Brave Linux installation](https://brave.com/linux/).
+## Command examples
+
+Run these commands from the repository root after installing the project.
+Replace `account-1` and `RUN_ID` with your profile directory name and run ID;
+Colab, Kaggle, and VPN commands require the configuration described above.
+
+```bash
+# Show available commands and general usage.
+python -m zepuppeteer --help
+
+# Show all options for running a workflow.
+python -m zepuppeteer run --help
+
+# List enabled profiles as JSON without opening Brave.
+python -m zepuppeteer profiles
+
+# List every discovered profile, including disabled profiles.
+python -m zepuppeteer profiles --include-disabled
+
+# Create or reopen a profile for manual website login.
+python -m zepuppeteer createProfile account-1
+
+# Open an existing profile until you close its browser window.
+python -m zepuppeteer openProfile account-1
+
+# Check a profile's VPN connectivity without opening Brave.
+python -m zepuppeteer vpnCheck account-1
+
+# Preview the demo group's workflow without installing or launching Brave.
+python -m zepuppeteer run --group demo --workflow demo --dry-run
+
+# Run the local demo workflow on the demo group in a visible browser window.
+python -m zepuppeteer run --group demo --workflow demo
+
+# Run the configured Colab workflow for one enabled profile.
+python -m zepuppeteer run --workflow colab --profile account-1
+
+# Run the configured Kaggle workflow for one enabled profile.
+python -m zepuppeteer run --workflow kaggle --profile account-1
+
+# Show the ten most recent workflow runs.
+python -m zepuppeteer history --limit 10
+
+# Show profile and step details for a specific workflow run.
+python -m zepuppeteer history --run-id RUN_ID
+
+# Run the original single-file demo task on enabled profiles in visible windows.
+python -m zepuppeteer --profiles-dir ./profiles --task ./examples/demo_task.py
+
+# Preview importing a Brave profile without moving its data.
+python scripts/import_brave_profile.py "Work account" account-1 --dry-run
+
+# Run the automated test suite.
+python -m unittest discover -s tests -v
+```

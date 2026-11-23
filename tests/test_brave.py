@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from zepuppeteer.brave import (
-    Profile, discover_profiles, find_brave, hide_webdriver, install_brave, launch_options,
+    Profile, discover_profiles, find_brave, install_brave, native_command, browser_environment,
     prepare_profile_for_launch, run_command,
 )
 from zepuppeteer.cli import load_task, main, run_profiles
@@ -41,12 +41,10 @@ class BraveTests(unittest.TestCase):
         profiles = discover_profiles(self.root)
         self.assertEqual([p.profile_directory for p in profiles], ["Default", "Profile 1", "Profile 10"])
         self.assertTrue(all(p.user_data_dir == self.root for p in profiles))
-        options = launch_options("/usr/bin/brave-browser", profiles[1])
-        self.assertIn("--profile-directory=Profile 1", options["args"])
-        self.assertTrue(options["chromium_sandbox"])
-        self.assertNotIn("--no-sandbox", options["args"])
-        self.assertIn("--password-store=basic", options["ignore_default_args"])
-        self.assertIn("--use-mock-keychain", options["ignore_default_args"])
+        options = native_command("/usr/bin/brave-browser", profiles[1])
+        self.assertIn("--profile-directory=Profile 1", options)
+        self.assertFalse(any("automation" in flag or "remote-debugging" in flag for flag in options))
+        self.assertNotIn("--no-sandbox", options)
 
     def test_empty_or_incorrect_directory_fails_clearly(self):
         with self.assertRaisesRegex(ValueError, "No profiles found"):
@@ -66,22 +64,22 @@ class BraveTests(unittest.TestCase):
             "PATH": "/custom/bin:/usr/bin",
         }
         with patch.dict(os.environ, inherited, clear=True):
-            options = launch_options("/usr/bin/brave-browser", Profile("test", self.root))
+            options = browser_environment()
             self.assertEqual(os.environ, inherited)
-        self.assertEqual(options["env"], {
+        self.assertEqual(options, {
             **inherited, "GSETTINGS_SCHEMA_DIR": "/usr/share/glib-2.0/schemas",
         })
 
     @patch("zepuppeteer.brave.platform.system", return_value="Linux")
     @patch.object(Path, "is_file", return_value=False)
     def test_missing_system_schemas_preserves_default_environment(self, *_):
-        options = launch_options("/brave", Profile("test", self.root))
-        self.assertNotIn("env", options)
+        options = browser_environment()
+        self.assertEqual(options, dict(os.environ))
 
     @patch("zepuppeteer.brave.platform.system", return_value="Darwin")
     def test_other_platforms_preserve_default_environment(self, *_):
-        options = launch_options("/brave", Profile("test", self.root))
-        self.assertNotIn("env", options)
+        options = browser_environment()
+        self.assertEqual(options, dict(os.environ))
 
     def test_invalid_executable_does_not_fall_back(self):
         with self.assertRaisesRegex(ValueError, "missing or not executable"):
@@ -169,101 +167,26 @@ class BraveTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
-    def context(self):
-        return SimpleNamespace(on=Mock(), close=AsyncMock(), add_init_script=AsyncMock(), pages=[])
-
-    async def test_browser_setup_continues_after_restored_tab_closes(self):
-        closed = Mock(return_value=False)
-
-        async def close_during_evaluation(_):
-            closed.return_value = True
-            raise RuntimeError("Target page, context or browser has been closed")
-
-        stale_frame = SimpleNamespace(is_detached=Mock(return_value=False),
-                                      evaluate=AsyncMock(side_effect=close_during_evaluation))
-        live_frame = SimpleNamespace(is_detached=Mock(return_value=False), evaluate=AsyncMock())
-        context = self.context()
-        context.pages = [SimpleNamespace(is_closed=closed, frames=[stale_frame]),
-                         SimpleNamespace(is_closed=Mock(return_value=False), frames=[live_frame])]
-        await hide_webdriver(context)
-        live_frame.evaluate.assert_awaited_once()
-
-    async def test_browser_setup_ignores_detached_or_navigating_frames(self):
-        detached = Mock(side_effect=[False, True])
-        vanished = SimpleNamespace(is_detached=detached, evaluate=AsyncMock(side_effect=RuntimeError("Frame detached")))
-        navigating = SimpleNamespace(is_detached=Mock(return_value=False), evaluate=AsyncMock(
-            side_effect=RuntimeError("Execution context was destroyed, most likely because of a navigation")))
-        already_detached = SimpleNamespace(is_detached=Mock(return_value=True), evaluate=AsyncMock())
-        context = self.context()
-        context.pages = [SimpleNamespace(is_closed=Mock(return_value=False),
-                                         frames=[vanished, navigating, already_detached])]
-        await hide_webdriver(context)
-        already_detached.evaluate.assert_not_awaited()
-
-    async def test_browser_setup_does_not_hide_failure_in_live_frame(self):
-        frame = SimpleNamespace(is_detached=Mock(return_value=False),
-                                evaluate=AsyncMock(side_effect=RuntimeError("Script failed")))
-        context = self.context()
-        context.pages = [SimpleNamespace(is_closed=Mock(return_value=False), frames=[frame])]
-        with self.assertRaisesRegex(RuntimeError, "Script failed"):
-            await hide_webdriver(context)
-
-    async def test_browser_setup_reports_disconnected_browser(self):
-        context = self.context()
-        context.browser = SimpleNamespace(is_connected=Mock(return_value=False))
-        with self.assertRaisesRegex(RuntimeError, "Brave disconnected"):
-            await hide_webdriver(context)
-
-    async def test_profiles_run_sequentially_and_each_context_closes(self):
-        contexts = [self.context(), self.context()]
-        profiles = [Profile(name, Path("/tmp") / name) for name in ["one", "two"]]
+    async def test_profiles_run_sequentially_and_close(self):
+        profiles = [Profile(name, Path("/tmp") / name) for name in ("one", "two")]
+        contexts = [SimpleNamespace(close=AsyncMock()), SimpleNamespace(close=AsyncMock())]
         seen = []
-
         async def task(context, profile):
             if seen:
                 contexts[0].close.assert_awaited_once()
             seen.append(profile.name)
-
-        launch = AsyncMock(side_effect=contexts)
-        playwright = SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=launch))
-        await run_profiles(playwright, profiles, "/brave", task, headless=True)
+        with patch("zepuppeteer.runner.launch_browser", AsyncMock(side_effect=contexts)):
+            await run_profiles(profiles, "/brave", task)
         self.assertEqual(seen, ["one", "two"])
         for context in contexts:
             context.close.assert_awaited_once()
 
-    async def test_task_failure_closes_context_and_stops_next_profile(self):
-        context = self.context()
-        launch = AsyncMock(return_value=context)
-        playwright = SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=launch))
-        task = AsyncMock(side_effect=RuntimeError("Task failed"))
-        profiles = [Profile(name, Path("/tmp") / name) for name in ["one", "two"]]
-        with self.assertRaisesRegex(RuntimeError, "Task failed"):
-            await run_profiles(playwright, profiles, "/brave", task, headless=True)
-        context.close.assert_awaited_once()
-        launch.assert_awaited_once()
-
-    async def test_browser_setup_failure_closes_context_before_running_task(self):
-        context = self.context()
-        context.add_init_script.side_effect = RuntimeError("Browser setup failed")
-        launch = AsyncMock(return_value=context)
-        playwright = SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=launch))
-        task = AsyncMock()
-        profiles = [Profile(name, Path("/tmp") / name) for name in ["one", "two"]]
-        with self.assertRaisesRegex(RuntimeError, "Browser setup failed"):
-            await run_profiles(playwright, profiles, "/brave", task, headless=True)
-        task.assert_not_awaited()
-        context.close.assert_awaited_once()
-        launch.assert_awaited_once()
-
-    async def test_cancellation_closes_active_context(self):
-        context = self.context()
-        launch = AsyncMock(return_value=context)
-        playwright = SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=launch))
-        task = AsyncMock(side_effect=asyncio.CancelledError())
-        with self.assertRaises(asyncio.CancelledError):
-            await run_profiles(playwright, [Profile("one", Path("/tmp/one"))], "/brave", task, headless=True)
-        context.close.assert_awaited_once()
-
-
-if __name__ == "__main__":
-    unittest.main()
+    async def test_failure_or_cancellation_closes_and_stops(self):
+        for failure in (RuntimeError("failed"), asyncio.CancelledError()):
+            context = SimpleNamespace(close=AsyncMock())
+            with patch("zepuppeteer.runner.launch_browser", AsyncMock(return_value=context)) as launch:
+                with self.assertRaises(type(failure)):
+                    await run_profiles([Profile("one", Path("/tmp/one")), Profile("two", Path("/tmp/two"))],
+                                       "/brave", AsyncMock(side_effect=failure))
+                launch.assert_awaited_once()
+                context.close.assert_awaited_once()

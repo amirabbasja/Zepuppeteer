@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
-from zepuppeteer.brave import find_brave, launch_options
+from zepuppeteer.brave import find_brave, native_command
 from zepuppeteer.cli import main
 from zepuppeteer.config import read_toml
 from zepuppeteer.profile_transfer import atomic_write
@@ -95,6 +95,7 @@ class CreateProfileTests(unittest.IsolatedAsyncioTestCase):
         with patch(f"{MODULE}.find_brave", return_value=None), \
                 patch(f"{MODULE}.os.getuid", return_value=1000, create=True), \
                 patch.dict(os.environ, {"DISPLAY": ":0"}), \
+                patch(f"{MODULE}.validate_desktop"), \
                 self.assertRaisesRegex(RuntimeError, "Brave is not installed"):
             await createProfile("new", profiles_dir=self.root, no_install=True)
         self.assertFalse(self.root.exists())
@@ -111,18 +112,15 @@ class CreateProfileTests(unittest.IsolatedAsyncioTestCase):
         async def close():
             self.closed.set()
 
-        self.browser = SimpleNamespace(on=lambda event, callback: handlers.update({event: callback}),
-                                       close=AsyncMock(side_effect=close),
-                                       add_init_script=AsyncMock(side_effect=setup), pages=[],
-                                       browser=SimpleNamespace(is_connected=Mock(return_value=True)))
+        closed = asyncio.Event()
+        handlers["close"] = closed.set
+        async def wait_closed():
+            self.opened.set()
+            await closed.wait()
+        self.browser = SimpleNamespace(close=AsyncMock(), wait_closed=wait_closed)
         launch = AsyncMock(return_value=self.browser, side_effect=launch_error)
-        playwright = SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=launch))
-
-        @contextlib.asynccontextmanager
-        async def factory():
-            yield playwright
-
-        with patch("playwright.async_api.async_playwright", factory), \
+        with patch("zepuppeteer.runner.launch_browser", launch), \
+                patch(f"{MODULE}.validate_desktop"), \
                 patch(f"{MODULE}.find_brave", return_value="/brave"), \
                 patch(f"{MODULE}.os.getuid", return_value=1000, create=True), \
                 patch.dict(os.environ, {"DISPLAY": ":0"}), contextlib.redirect_stdout(io.StringIO()):
@@ -140,7 +138,7 @@ class CreateProfileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(read_toml(profile.manifest_path), {"enabled": True, "tags": [], "settings": {}})
                 self.assertTrue(profile.user_data_dir.is_dir())
                 self.assertFalse(launch.call_args.kwargs["headless"])
-                self.assertEqual(launch.call_args.kwargs["user_data_dir"], str(profile.user_data_dir))
+                self.assertEqual(launch.call_args.args[1], profile)
                 handlers["close"]()
                 result = await asyncio.wait_for(task, timeout=3)
                 self.assertEqual(result.outputs["manifest_path"], str(profile.manifest_path))
@@ -158,7 +156,7 @@ class CreateProfileTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(self.opened.wait(), timeout=3)
                 handlers["close"]()
                 result = await asyncio.wait_for(task, timeout=3)
-                return result, launch.call_args.kwargs
+                return result, {"user_data_dir": str(launch.call_args.args[1].user_data_dir), "args": native_command("/brave", launch.call_args.args[1])}
             finally:
                 if not task.done():
                     task.cancel()
@@ -356,67 +354,3 @@ class CreateProfileCliTests(unittest.TestCase):
                 main([command, "account-3", "--profiles-dir", "/tmp/new-profiles", "--dry-run", "--no-install"])
                 task.assert_awaited_once_with("account-3", profiles_dir="/tmp/new-profiles", executable=None,
                                              dry_run=True, no_install=True)
-
-
-@unittest.skipUnless(BRAVE and importlib.util.find_spec("playwright"), "Requires Brave and Playwright")
-class CreateProfileBrowserTests(unittest.IsolatedAsyncioTestCase):
-    async def test_saved_cookie_and_local_storage_survive_setup_and_workflow_reopen(self):
-        await self.check_saved_session()
-
-    async def test_existing_account_retains_configuration_and_browser_session(self):
-        await self.check_saved_session('enabled=false\n[profile.platforms.colab]\nlogin_username="account@example.test"\n')
-
-    async def test_named_profile_retains_display_name_and_browser_session(self):
-        await self.check_saved_session('[profile]\nbrave_browser_displayName="AI-acc5"\n')
-
-    async def check_saved_session(self, metadata=None):
-        from playwright.async_api import async_playwright
-
-        with tempfile.TemporaryDirectory(prefix="zepuppeteer-create-browser-") as temporary:
-            root = Path(temporary) / "profiles"
-            manifest = root / "new/profile.toml"
-            if metadata is not None:
-                manifest.parent.mkdir(parents=True)
-                manifest.write_text(metadata)
-            async with async_playwright() as playwright:
-                async def respond(route):
-                    await route.fulfill(body="<title>Local login fixture</title>", content_type="text/html")
-
-                async def login_session(_playwright, profiles, executable):
-                    # Exercise the manual setup lifecycle with a disposable headless browser.
-                    from zepuppeteer.runner import run_profiles
-
-                    async def login(context, profile):
-                        await context.route("**/*", respond)
-                        page = await context.new_page()
-                        await page.goto("https://login.example.test/")
-                        await page.evaluate("localStorage.setItem('account', 'saved')")
-                        await context.add_cookies([{"name": "login", "value": "saved",
-                                                   "url": "https://login.example.test/",
-                                                   "expires": time.time() + 3600}])
-
-                    await run_profiles(_playwright, profiles, executable, task=login, headless=True)
-
-                with patch(f"{MODULE}.run_profiles", side_effect=login_session), \
-                        patch("zepuppeteer.profiles.Path.home", return_value=Path(temporary) / "home"), \
-                        patch.dict(os.environ, {"DISPLAY": ":0"}), contextlib.redirect_stdout(io.StringIO()):
-                    await createProfile("new", profiles_dir=root, executable=BRAVE, no_install=True)
-                    profile, = discover_profiles(root)
-                if metadata is not None:
-                    self.assertEqual(manifest.read_text(), metadata)
-                if profile.browser_display_name:
-                    self.assertEqual(profile.browser_display_name, "AI-acc5")
-                    preferences = profile.user_data_dir / profile.profile_directory / "Preferences"
-                    self.assertEqual(json.loads(preferences.read_text())["profile"]["name"], "AI-acc5")
-                browser = await playwright.chromium.launch_persistent_context(**launch_options(BRAVE, profile, True))
-                try:
-                    cookies = await browser.cookies("https://login.example.test/")
-                    self.assertTrue(any(cookie["name"] == "login" and cookie["value"] == "saved" for cookie in cookies))
-                    await browser.route("**/*", respond)
-                    page = await browser.new_page()
-                    await page.goto("https://login.example.test/")
-                    state = await browser.storage_state()
-                    self.assertIn({"origin": "https://login.example.test",
-                                   "localStorage": [{"name": "account", "value": "saved"}]}, state["origins"])
-                finally:
-                    await browser.close()

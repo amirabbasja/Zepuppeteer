@@ -28,3 +28,23 @@ notebook_url = "https://colab.research.google.com/notebooks/intro.ipynb"
 # login_username = "your-kaggle-username"
 # notebook_url = "https://www.kaggle.com/code/your-kaggle-username/your-notebook/edit"
 # notebook_name = "Your Notebook"
+
+# Screen automation runs on a visible Linux X11 desktop. Configure screenshot
+# crops for icon-only targets, using paths relative to this profile.toml.
+# Regions are [left, top, width, height] fractions of the browser window.
+# [settings.screen.targets.google_account]
+# image = "icons/google-account.png"
+# region = [0.7, 0.08, 0.3, 0.25]
+# confidence = 0.9
+#
+# [settings.screen.targets.colab_connection_options]
+# image = "icons/connection-options.png"
+# region = [0.5, 0.08, 0.5, 0.3]
+#
+# [settings.screen.targets.colab_saved]
+# text = "All changes saved"
+# region = [0.0, 0.08, 1.0, 0.25]
+#
+# [settings.screen.targets.kaggle_account]
+# image = "icons/kaggle-account.png"
+# region = [0.7, 0.08, 0.3, 0.25]

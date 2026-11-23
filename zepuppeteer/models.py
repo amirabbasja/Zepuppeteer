@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from playwright.async_api import BrowserContext
+    from .screen import ScreenBrowser
     from .vpn import VPNConnection
 
 
@@ -43,7 +43,7 @@ class Workflow:
 
 @dataclass(frozen=True)
 class TaskContext:
-    browser: "BrowserContext"
+    browser: "ScreenBrowser"
     profile: Profile
     params: dict[str, Any]
     inputs: dict[str, Any]
