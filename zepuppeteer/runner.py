@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import asdict
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -10,7 +11,7 @@ import re
 import sys
 from uuid import uuid4
 
-from .brave import hide_webdriver, launch_options, prepare_profile_for_launch
+from .brave import hide_webdriver, launch_options, prepare_profile_for_launch, profile_network
 from .config import json_text
 from .models import NeedsAttention, RunSummary, TaskContext, TaskResult
 from .notifications import notify_attention
@@ -21,23 +22,25 @@ async def run_profiles(playwright, profiles, executable, task=None, headless=Fal
     for profile in profiles:
         print(f"Opening profile: {profile.name}", flush=True)
         prepare_profile_for_launch(profile)
-        context = await playwright.chromium.launch_persistent_context(
-            **launch_options(executable, profile, headless)
-        )
-        closed = asyncio.Event()
-        context.on("close", lambda *_: closed.set())
-        try:
-            await hide_webdriver(context)
-            if task:
-                await task(context=context, profile=profile)
-                print(f"Completed profile: {profile.name}", flush=True)
-            else:
-                print("Close this browser to continue to the next profile. Ctrl+C stops the runner.", flush=True)
-                if context.browser is not None and not context.browser.is_connected():
-                    closed.set()
-                await closed.wait()
-        finally:
-            await context.close()
+        async with profile_network(profile, executable) as (browser_executable, route):
+            context = await playwright.chromium.launch_persistent_context(
+                **launch_options(browser_executable, profile, headless)
+            )
+            context._zepuppeteer_vpn_route = route
+            closed = asyncio.Event()
+            context.on("close", lambda *_: closed.set())
+            try:
+                await hide_webdriver(context)
+                if task:
+                    await task(context=context, profile=profile)
+                    print(f"Completed profile: {profile.name}", flush=True)
+                else:
+                    print("Close this browser to continue to the next profile. Ctrl+C stops the runner.", flush=True)
+                    if context.browser is not None and not context.browser.is_connected():
+                        closed.set()
+                    await closed.wait()
+            finally:
+                await context.close()
 
 
 def _component(value: str) -> str:
@@ -144,13 +147,18 @@ async def _steps(browser, profile, workflow, tasks, state, run_id, directory, tr
 async def _profile(playwright, profile, executable, workflow, tasks, state, run_id,
                    directory, headless, trace) -> str:
     browser, status, error = None, "success", None
+    network = AsyncExitStack()
     state.start_profile(run_id, profile.name)
     print(f"Opening profile: {profile.name}", flush=True)
     try:
         directory.mkdir(parents=True)
         prepare_profile_for_launch(profile)
+        platforms = {step.task.split(".", 1)[0] for step in workflow.steps}
+        browser_executable, route = await network.enter_async_context(
+            profile_network(profile, executable, platforms=platforms))
         browser = await playwright.chromium.launch_persistent_context(
-            **launch_options(executable, profile, headless))
+            **launch_options(browser_executable, profile, headless))
+        browser._zepuppeteer_vpn_route = route
         await hide_webdriver(browser)
         error = await _steps(browser, profile, workflow, tasks, state, run_id, directory, trace)
         if error:
@@ -162,25 +170,31 @@ async def _profile(playwright, profile, executable, workflow, tasks, state, run_
     except Exception as failure:
         status, error = "failed", _error_text(failure)
         state.fail_running(run_id, profile.name, error)
+        if isinstance(failure, NeedsAttention):
+            platform = workflow.steps[0].task.split(".", 1)[0] if workflow.steps else "browser"
+            await notify_attention(profile, platform, str(failure))
         await _evidence(browser, directory, error)
     finally:
         cancelled_during_close = False
-        if browser is not None:
-            cleanup = asyncio.create_task(browser.close())
-            try:
-                await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                status, error = "cancelled", "Cancelled during browser cleanup"
-                state.cancel_running(run_id, profile.name)
-                # Finish the already-started close before returning control to the CLI.
+        resources = [("Browser", browser.close)] if browser is not None else []
+        # The browser must exit before its tunnel and namespace are removed.
+        resources.append(("VPN", network.aclose))
+        for label, close in resources:
+            cleanup = asyncio.create_task(close())
+            while not cleanup.done():
                 try:
-                    await cleanup
-                except Exception as failure:
-                    error += f"; {_error_text(failure)}"
-                cancelled_during_close = True
-            except Exception as failure:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    status, error = "cancelled", f"Cancelled during {label.lower()} cleanup"
+                    state.cancel_running(run_id, profile.name)
+                    cancelled_during_close = True
+                except Exception:
+                    break
+            try:
+                cleanup.result()
+            except BaseException as failure:
                 if status != "cancelled":
-                    status, error = "failed", f"{error + '; ' if error else ''}Browser cleanup: {_error_text(failure)}"
+                    status, error = "failed", f"{error + '; ' if error else ''}{label} cleanup: {_error_text(failure)}"
         state.skip_pending(run_id, profile.name, error or "Workflow finished")
         state.finish_profile(run_id, profile.name, status, error)
         if cancelled_during_close:

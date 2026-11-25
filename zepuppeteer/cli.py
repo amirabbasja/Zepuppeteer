@@ -65,10 +65,11 @@ def parser() -> argparse.ArgumentParser:
     workflow.add_argument("--state-db", default="./data/runs.sqlite", help="Execution history database")
     workflow.add_argument("--artifacts-dir", default="./artifacts", help="Task output and failure evidence root")
     workflow.add_argument("--no-trace", action="store_true", help="Disable browser trace recording")
-    profiles = commands.add_parser("profiles", help="List selected profiles as JSON without opening Brave")
+    profiles = commands.add_parser("profiles", help="List selected profiles without opening Brave")
     _profile_arguments(profiles)
     _selection_arguments(profiles)
     profiles.add_argument("--include-disabled", action="store_true")
+    profiles.add_argument("--names", action="store_true", help="Print only profile names, one per line")
     create = commands.add_parser("createProfile", aliases=["create-profile"],
                                  help="Initialize or reopen a Brave profile for manual login")
     create.add_argument("profile_name", help="Profile directory name (existing configuration is preserved)")
@@ -76,6 +77,12 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--executable", help="Path or command name of the Brave executable")
     create.add_argument("--no-install", action="store_true", help="Fail instead of installing missing Brave")
     create.add_argument("--dry-run", action="store_true", help="Preview without creating files or opening Brave")
+    open_profile = commands.add_parser("openProfile", aliases=["open-profile"],
+                                       help="Open an existing profile in regular Brave for manual login")
+    open_profile.add_argument("profile_name", help="Profile directory name")
+    open_profile.add_argument("--profiles-dir", default="./profiles")
+    open_profile.add_argument("--executable", help="Path or command name of the Brave executable")
+    open_profile.add_argument("--dry-run", action="store_true", help="Print the Brave command without launching")
     vpn = commands.add_parser("vpnCheck", help="Check one profile's VPN without opening Brave")
     vpn.add_argument("profile_name", help="Profile directory name")
     vpn.add_argument("--profiles-dir", default="./profiles")
@@ -107,6 +114,11 @@ def _profile_json(profile):
 
 async def run(args) -> None:
     command = getattr(args, "command", None)
+    if command in {"openProfile", "open-profile"}:
+        from .tasks.openProfile import openProfile
+        await openProfile(args.profile_name, profiles_dir=args.profiles_dir, executable=args.executable,
+                          dry_run=args.dry_run)
+        return
     if command in {"createProfile", "create-profile"}:
         from .tasks.createProfile import createProfile
         await createProfile(args.profile_name, profiles_dir=args.profiles_dir, executable=args.executable,
@@ -126,7 +138,10 @@ async def run(args) -> None:
         names=getattr(args, "profile", None), tags=getattr(args, "tag", None),
         include_disabled=getattr(args, "include_disabled", False))
     if command == "profiles":
-        print(json.dumps([_profile_json(profile) for profile in profiles], indent=2))
+        if args.names:
+            print("\n".join(profile.name for profile in profiles))
+        else:
+            print(json.dumps([_profile_json(profile) for profile in profiles], indent=2))
         return
     workflow = load_workflow(workflow_path(args.workflow, args.config_dir)) if command == "run" else None
     tasks = resolve_tasks(workflow) if workflow else None

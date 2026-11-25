@@ -58,6 +58,25 @@ class ColabBrowserTests(unittest.IsolatedAsyncioTestCase):
         await page.goto("https://accounts.google.com/ServiceLogin")
         self.assertEqual(await check_login(page, "account@example.test"), "logged_out")
 
+    async def test_google_login_pages_are_logged_out_in_any_language(self):
+        page = await self.browser.new_page()
+        cases = [
+            ("en", "Sign in", "Use your Google Account", "Forgot email?",
+             "Not your computer? Use Guest mode to sign in privately. Learn more about using Guest mode"),
+            ("fa", "ورود", "از حساب Google خود استفاده کنید", "ایمیل را فراموش کرده‌اید؟", ""),
+            ("es", "Iniciar sesión", "Usa tu cuenta de Google", "¿Has olvidado tu correo electrónico?", ""),
+            ("ja", "ログイン", "Google アカウントを使用", "メールアドレスを忘れた場合", ""),
+        ]
+        for locale, title, subtitle, forgot_email, guest_mode in cases:
+            with self.subTest(locale=locale):
+                await self.serve(f'''<!doctype html><html lang="{locale}"><main>
+                    <h1>{title}</h1><p>{subtitle}</p>
+                    <input id="identifierId" name="identifier" type="email">
+                    <button>{forgot_email}</button><p>{guest_mode}</p>
+                    </main></html>''')
+                await page.goto(f"https://accounts.google.com/v3/signin/identifier?hl={locale}")
+                self.assertEqual(await check_login(page, "account@example.test", timeout=0.1), "logged_out")
+
     async def test_public_signed_out_notebook_saves_real_artifacts(self):
         await self.serve(EDITOR.format(dialog=""))
         directory = self.root / "artifacts"

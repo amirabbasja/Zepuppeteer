@@ -98,16 +98,20 @@ async def _wireguard_privileges():
     if os.geteuid() == 0:
         return []
     sudo = _required("sudo")
-    code, _ = await _command([sudo, "-n", "-v"], label="Check WireGuard sudo authorization", check=False)
+    ip = _required("ip")
+    # sudo -v has separate password rules and can reject command-specific
+    # NOPASSWD access. Test an actual read-only network command instead.
+    code, _ = await _command([sudo, "-n", ip, "netns", "list"],
+                             label="Check WireGuard sudo authorization", check=False)
     if code:
         if not sys.stdin.isatty():
-            raise RuntimeError("WireGuard needs sudo authorization. Run 'sudo -v' in the same terminal, "
+            raise RuntimeError("WireGuard needs sudo authorization. Run 'sudo ip netns list' in the same terminal, "
                                "then retry vpnCheck. Unattended runs need sudo authorization configured in advance.")
         print("WireGuard needs administrator privileges to create its temporary network namespace. "
               "Authenticate at the sudo prompt:", flush=True)
         # Inherit the terminal so sudo handles the password itself. Never pipe,
         # capture, or store passwords, and never prompt from unattended runs.
-        process = await asyncio.create_subprocess_exec(sudo, "-v")
+        process = await asyncio.create_subprocess_exec(sudo, ip, "netns", "list")
         try:
             code = await process.wait()
         except BaseException:
@@ -115,7 +119,7 @@ async def _wireguard_privileges():
             raise
         if code:
             raise RuntimeError("WireGuard sudo authentication failed or permission was denied. "
-                               "Run 'sudo -v' in your terminal to check access, then retry vpnCheck.")
+                               "Run 'sudo ip netns list' in your terminal to check access, then retry vpnCheck.")
     return [sudo, "-n"]
 
 

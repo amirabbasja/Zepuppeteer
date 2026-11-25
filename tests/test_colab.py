@@ -42,7 +42,8 @@ class ColabTaskTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(temporary.name)
         def screenshot(*, path, timeout):
             Path(path).write_bytes(b"\x89PNG\r\n\x1a\nfixture")
-        self.page = SimpleNamespace(screenshot=AsyncMock(side_effect=screenshot), close=AsyncMock())
+        self.page = SimpleNamespace(url=DEFAULT_NOTEBOOK_URL,
+                                    screenshot=AsyncMock(side_effect=screenshot), close=AsyncMock())
         self.browser = SimpleNamespace(new_page=AsyncMock(return_value=self.page))
         self.ctx = TaskContext(self.browser, Profile("account-1", self.root / "browser"), {}, {}, self.root,
                                "test-run", "colab.open_notebook")
@@ -75,6 +76,34 @@ class ColabTaskTests(unittest.IsolatedAsyncioTestCase):
                     await run(ctx)
         self.page.close.assert_not_awaited()
         self.page.screenshot.assert_not_awaited()
+
+    async def test_google_login_redirect_is_logged_out_before_editor_loads(self):
+        for locale in ("en", "fa", "es", "ja"):
+            for ctx in (self.ctx, self.manifest_context()):
+                with self.subTest(locale=locale, expected_account=bool(ctx.profile.manifest_path)):
+                    self.page.url = f"https://accounts.google.com/v3/signin/identifier?hl={locale}"
+                    error = NeedsAttention("Colab requires Google sign-in or consent.")
+                    site = SimpleNamespace(open_notebook=AsyncMock(side_effect=error))
+                    with patch("zepuppeteer.tasks.colab.open_notebook.ColabSite", return_value=site), \
+                            patch("zepuppeteer.tasks.colab.open_notebook.check_login", AsyncMock()) as login:
+                        with self.assertRaisesRegex(NeedsAttention, "logged_out") as raised:
+                            await run(ctx)
+                    self.assertIs(raised.exception.__cause__, error)
+                    login.assert_not_awaited()
+        self.page.close.assert_not_awaited()
+        self.page.screenshot.assert_not_awaited()
+
+    async def test_other_attention_errors_are_not_reported_as_logged_out(self):
+        for url in (DEFAULT_NOTEBOOK_URL, "https://consent.google.com/",
+                    "https://accounts.google.com.example.test/"):
+            with self.subTest(url=url):
+                self.page.url = url
+                error = NeedsAttention("Manual attention required.")
+                site = SimpleNamespace(open_notebook=AsyncMock(side_effect=error))
+                with patch("zepuppeteer.tasks.colab.open_notebook.ColabSite", return_value=site):
+                    with self.assertRaises(NeedsAttention) as raised:
+                        await run(self.ctx)
+                self.assertIs(raised.exception, error)
 
     async def test_url_precedence_and_artifact_contents(self):
         configured = "https://colab.research.google.com/drive/profile-notebook"

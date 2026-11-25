@@ -15,6 +15,83 @@ from uuid import uuid4
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _no_local_browser() -> bool:
+    """Fail closed when the Linux process inventory cannot be inspected."""
+    try:
+        processes = list(Path("/proc").iterdir())
+        for process in processes:
+            if not process.name.isdigit():
+                continue
+            try:
+                name = (process / "comm").read_text().strip().lower()
+            except FileNotFoundError:
+                continue  # Process exited during the scan.
+            if name in {"brave", "brave-browser", "brave-browser-s", "chrome", "chromium", "chromium-browse"}:
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def recover_stale_browser_locks(root: Path) -> None:
+    """Back up orphaned locks after a Studio hostname change, before launch.
+
+    Chromium's socket lives in host-local /tmp. A missing socket directory and
+    no local browser distinguish an old Studio's locks from a running browser.
+    Unknown lock formats and live sockets remain untouched.
+    """
+    lock = root / "SingletonLock"
+    if not lock.is_symlink():
+        return
+    target = os.readlink(lock)
+    hostname, _, pid_text = target.rpartition("-")
+    if not hostname or hostname == socket.gethostname() or not pid_text.isdigit() or int(pid_text) <= 0:
+        return
+    socket_link = root / "SingletonSocket"
+    if not socket_link.is_symlink():
+        return
+    socket_target = Path(os.readlink(socket_link))
+    if not socket_target.is_absolute():
+        return
+    try:
+        socket_target.parent.stat()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return
+    else:
+        return
+    links = {}
+    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        path = root / name
+        if path.is_symlink():
+            links[path] = (path.lstat(), os.readlink(path))
+        elif path.exists():
+            return
+    if not _no_local_browser():
+        return
+    # Do not move a lock replaced by a browser starting during our inspection.
+    for path, (original, value) in links.items():
+        try:
+            current = path.lstat()
+            if (current.st_dev, current.st_ino, os.readlink(path)) != (original.st_dev, original.st_ino, value):
+                return
+        except OSError:
+            return
+    backup = Path(tempfile.mkdtemp(prefix="SingletonLocks.backup-", dir=root))
+    moved = []
+    try:
+        for path in links:
+            path.rename(backup / path.name)
+            moved.append(path)
+    except OSError:
+        for path in reversed(moved):
+            if not path.exists() and not path.is_symlink():
+                (backup / path.name).rename(path)
+        raise
+    print(f"Recovered stale Brave locks from {hostname}; backup: {backup}", flush=True)
+
+
 def ensure_closed(root: Path) -> None:
     lock = root / "SingletonLock"
     if not lock.is_symlink():
@@ -23,7 +100,11 @@ def ensure_closed(root: Path) -> None:
         return
     hostname, _, pid_text = os.readlink(lock).rpartition("-")
     if hostname != socket.gethostname() or not pid_text.isdigit():
-        raise RuntimeError(f"Cannot establish whether Brave is closed: {root}")
+        raise RuntimeError(
+            f"Cannot establish whether Brave is closed: {lock} points to {os.readlink(lock)!r} "
+            f"(current host: {socket.gethostname()}). If this data was moved from another host, "
+            "verify Brave is closed there before removing the stale SingletonLock."
+        )
     try:
         os.kill(int(pid_text), 0)
     except ProcessLookupError:

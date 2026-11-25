@@ -8,11 +8,12 @@ import re
 import shlex
 import shutil
 import subprocess
+from contextlib import asynccontextmanager
 from typing import Callable
 
-from .models import Profile
+from .models import NeedsAttention, Profile
 from .profiles import discover_profiles  # Backwards-compatible public import.
-from .profile_transfer import atomic_write, ensure_closed
+from .profile_transfer import atomic_write, ensure_closed, recover_stale_browser_locks
 
 
 _WEBDRIVER_INIT_SCRIPT = """
@@ -74,7 +75,7 @@ def install_brave(run: Callable[[list[str]], None] = run_command) -> None:
         raise RuntimeError("Run as your normal desktop user; the installer uses sudo when needed.")
     print("Brave is missing. Installing the stable release through its official APT repository.", flush=True)
     run(["sudo", "apt-get", "update"])
-    run(["sudo", "apt-get", "install", "-y", "curl", "ca-certificates"])
+    run(["sudo", "apt-get", "install", "-y", "curl", "ca-certificates", "wireguard-tools", "iproute2", "util-linux", "procps"])
     base = "https://brave-browser-apt-release.s3.brave.com"
     run(["sudo", "curl", "--proto", "=https", "-fsSLo",
          "/usr/share/keyrings/brave-browser-archive-keyring.gpg",
@@ -88,6 +89,7 @@ def install_brave(run: Callable[[list[str]], None] = run_command) -> None:
 
 def prepare_profile_for_launch(profile: Profile) -> None:
     """Start the selected persistent profile blank, keeping cookies and logins."""
+    recover_stale_browser_locks(profile.user_data_dir)
     ensure_closed(profile.user_data_dir)
     preferences = profile.user_data_dir / (profile.profile_directory or "Default") / "Preferences"
     if not preferences.is_file():
@@ -109,8 +111,49 @@ def prepare_profile_for_launch(profile: Profile) -> None:
     atomic_write(preferences, updated)
 
 
+def browser_environment() -> dict[str, str] | None:
+    """Use system GTK schemas while preserving the desktop session and keyring."""
+    schemas = Path("/usr/share/glib-2.0/schemas")
+    if platform.system() == "Linux" and (schemas / "gschemas.compiled").is_file():
+        return {**os.environ, "GSETTINGS_SCHEMA_DIR": str(schemas)}
+    return None
+
+
+@asynccontextmanager
+async def profile_network(profile: Profile, executable: str, *, platforms=None):
+    """Keep a profile's VPN and namespace alive for its whole browser session."""
+    from .vpn import browser_vpn, vpn_required
+    from .vpn_browser import vpn_executable
+
+    recover_stale_browser_locks(profile.user_data_dir)
+
+    def require_closed():
+        try:
+            ensure_closed(profile.user_data_dir)
+        except RuntimeError as error:
+            raise NeedsAttention(
+                f"Profile '{profile.name}': close all Brave windows using {profile.user_data_dir} "
+                "before launching through its VPN. An existing browser cannot be reused safely. "
+                f"Lock check: {error}"
+            ) from error
+
+    if vpn_required(profile, platforms=platforms):
+        require_closed()
+    async with browser_vpn(profile, platforms=platforms) as route:
+        if route is None:
+            yield executable, None
+        else:
+            # Configuration can change while the tunnel starts. Check the
+            # actual routed launch too, before Chromium can reuse an instance.
+            require_closed()
+            with vpn_executable(executable, route) as wrapped:
+                yield wrapped, route
+
+
 def launch_options(executable: str, profile: Profile, headless: bool = False) -> dict:
     args = ["--no-first-run", "--hide-crash-restore-bubble"]
+    if not headless:
+        args.append("--start-fullscreen")
     if profile.profile_directory:
         args.append(f"--profile-directory={profile.profile_directory}")
     options = {
@@ -131,7 +174,7 @@ def launch_options(executable: str, profile: Profile, headless: bool = False) ->
     # Brave is a system application. Virtual environments and packaged terminals
     # can expose older GNOME schemas that crash GTK during visible startup.
     # Scope this override to the browser; preserve display/session variables.
-    schemas = Path("/usr/share/glib-2.0/schemas")
-    if platform.system() == "Linux" and (schemas / "gschemas.compiled").is_file():
-        options["env"] = {**os.environ, "GSETTINGS_SCHEMA_DIR": str(schemas)}
+    environment = browser_environment()
+    if environment is not None:
+        options["env"] = environment
     return options

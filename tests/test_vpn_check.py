@@ -281,10 +281,10 @@ class TunnelTests(VPNFixture):
         self.command.return_value = (1, "")
         with patch(f"{TASK}.os.geteuid", return_value=1000), \
                 patch(f"{TASK}.sys.stdin.isatty", return_value=False), \
-                self.assertRaisesRegex(RuntimeError, "sudo -v"):
+                self.assertRaisesRegex(RuntimeError, "sudo ip netns list"):
             await vpn._wireguard(self.config, "/curl", vpn.DEFAULT_URL, 15)
         self.command.assert_awaited_once()
-        self.assertEqual(self.command.call_args.args[0], ["/sudo", "-n", "-v"])
+        self.assertEqual(self.command.call_args.args[0], ["/sudo", "-n", "/ip", "netns", "list"])
 
     async def test_endpoint_dns_failure_precedes_sudo_and_network_changes(self):
         self.config.write_text(WG.replace("127.0.0.1:51820", "vpn.example.test:51820"))
@@ -408,7 +408,23 @@ class WireGuardPrivilegeTests(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(mock.stop)
 
     async def test_cached_authorization_does_not_prompt(self):
-        with patch(f"{TASK}._command", AsyncMock(return_value=(0, ""))), \
+        with patch(f"{TASK}._command", AsyncMock(return_value=(0, ""))) as command, \
+                patch(f"{TASK}.asyncio.create_subprocess_exec", AsyncMock()) as spawn:
+            self.assertEqual(await vpn._wireguard_privileges(), ["/sudo", "-n"])
+        command.assert_awaited_once_with(["/sudo", "-n", "/ip", "netns", "list"],
+                                        label="Check WireGuard sudo authorization", check=False)
+        spawn.assert_not_awaited()
+
+    async def test_command_specific_passwordless_access_does_not_validate_all_sudo_rules(self):
+        async def policy(command, **kwargs):
+            # This user can run the required ip command, but sudo -v would
+            # require a password because other rules are not NOPASSWD.
+            if command == ["/sudo", "-n", "/ip", "netns", "list"]:
+                return 0, ""
+            return 1, ""
+
+        with patch(f"{TASK}._command", side_effect=policy), \
+                patch(f"{TASK}.sys.stdin.isatty", return_value=False), \
                 patch(f"{TASK}.asyncio.create_subprocess_exec", AsyncMock()) as spawn:
             self.assertEqual(await vpn._wireguard_privileges(), ["/sudo", "-n"])
         spawn.assert_not_awaited()
@@ -420,14 +436,14 @@ class WireGuardPrivilegeTests(unittest.IsolatedAsyncioTestCase):
                 patch(f"{TASK}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)) as spawn, \
                 contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(await vpn._wireguard_privileges(), ["/sudo", "-n"])
-        spawn.assert_awaited_once_with("/sudo", "-v")
+        spawn.assert_awaited_once_with("/sudo", "/ip", "netns", "list")
         process.wait.assert_awaited_once()
 
     async def test_unattended_runs_fail_with_instructions_and_never_prompt(self):
         with patch(f"{TASK}._command", AsyncMock(return_value=(1, ""))), \
                 patch(f"{TASK}.sys.stdin.isatty", return_value=False), \
                 patch(f"{TASK}.asyncio.create_subprocess_exec", AsyncMock()) as spawn:
-            with self.assertRaisesRegex(RuntimeError, "sudo -v.*same terminal"):
+            with self.assertRaisesRegex(RuntimeError, "sudo ip netns list.*same terminal"):
                 await vpn._wireguard_privileges()
         spawn.assert_not_awaited()
 

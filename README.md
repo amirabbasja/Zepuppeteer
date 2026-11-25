@@ -17,12 +17,16 @@ Requires Python 3.10+ and a normal desktop user account. Run these commands from
 the repository root:
 
 ```bash
+# Native dependencies, including WireGuard VPN checks (Ubuntu/Debian).
+sudo apt-get update
+sudo apt-get install -y curl ca-certificates wireguard-tools iproute2 util-linux procps
+
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
 
 mkdir -p profiles/account-1/src profiles/account-2/src
-cp examples/profile.toml profiles/account-1/profile.toml
+cp examples/profile.toml prVofiles/account-1/profile.toml
 cp examples/profile.toml profiles/account-2/profile.toml
 
 # Inspect exactly which profiles and tasks would run.
@@ -37,13 +41,11 @@ python -m zepuppeteer history
 
 Alternatively, use `uv sync --locked`, then prefix commands with `uv run`.
 `uv.lock` pins dependencies. Python 3.10 uses `tomli` for TOML parsing; newer
-Python versions use the standard library. On Ubuntu, install `python3-venv` if
-virtual environment creation is unavailable. The installed `zepuppeteer` command
-is equivalent to `python -m zepuppeteer`.
-
 If Brave is missing, execution can install it through its official Ubuntu/Debian
 APT repository using sudo. The installer needs network access and may prompt for
-your sudo password. Pass `--no-install` to fail instead, or
+your sudo password. It also installs `wireguard-tools` and `iproute2` for VPN
+checks. If Brave is already installed, use the native dependency commands above
+to add these tools. Pass `--no-install` to fail instead, or
 `--executable /path/to/brave-browser` to select an existing executable. Do not run
 the application itself as root. Headless execution needs no desktop display;
 visible execution requires DISPLAY or WAYLAND_DISPLAY.
@@ -109,6 +111,8 @@ may prompt interactively.
 From the copied repository root, recreate the Python environment:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y curl ca-certificates wireguard-tools iproute2 util-linux procps
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
@@ -428,6 +432,23 @@ example with `os.environ[settings["password_env"]]`. The framework does not log 
 to websites automatically. Listing profiles and printing a dry-run plan omit
 settings contents. Other metadata is left untouched.
 
+For manual logins in an existing profile, launch regular Brave directly:
+
+```bash
+python -m zepuppeteer openProfile acc-5
+# Print the resolved browser command without launching it:
+python -m zepuppeteer openProfile acc-5 --dry-run
+```
+
+`openProfile` (alias `open-profile`) uses the account's existing browser data and
+opens a normal Brave window. Log in to the websites you need, then close Brave
+before running workflows. VPN-enabled profiles use their configured VPN for
+the entire browser session, including manual logins; close all Brave windows
+sharing that data root before opening one. For profiles without VPN routing,
+an already-running instance can open the new window and return immediately.
+Use `--profiles-dir PATH` or `--executable PATH`
+as needed. Missing profiles or browser data must first be set up with `createProfile`.
+
 To open a named profile from the installed Brave browser on Ubuntu, set:
 
 ```toml
@@ -496,6 +517,7 @@ profile discovery order.
 
 ```bash
 python -m zepuppeteer profiles
+python -m zepuppeteer profiles --names
 python -m zepuppeteer profiles --group demo
 python -m zepuppeteer profiles --include-disabled
 python -m zepuppeteer run --workflow demo --group demo --profile account-1
@@ -600,9 +622,17 @@ table in the account's `profile.toml`:
 login_username = "account@example.com"
 notebook_url = "https://colab.research.google.com/drive/YOUR_NOTEBOOK_ID"
 notebook_name = "your-notebook.ipynb"
+use_vpn = false # Set true when profile VPN settings are configured.
 auto_connect = true
 job_start_timeout_seconds = 300
 ```
+
+`use_vpn` defaults to `false`. When `true`, Brave is launched through the profile's
+configured VPN before any notebook navigation, and the tunnel stays active until
+Brave closes. Colab checks that same live tunnel before opening the notebook.
+Missing tools, invalid settings, or failed connectivity raise `NeedsAttention`;
+the browser is never retried through a direct connection. Configure the VPN as
+described below.
 
 `notebook_name` must match the title exactly, excluding the trailing ` - Colab`.
 Use `notebook_url`, not the older `worker_url` key. The current implementation
@@ -681,10 +711,41 @@ These selectors have local DOM-fixture coverage; a signed-in Kaggle notebook
 has not been used for end-to-end verification. The task does not sign in, start
 sessions, edit or execute cells, or save notebook versions automatically.
 
-## VPN connectivity task
+## Profile VPN routing and connectivity checks
+
+To require the configured VPN for every launch of a profile, add:
+
+```toml
+[profile]
+use_vpn = true
+```
+
+`use_vpn = true` under `[profile.platforms.colab]` or another platform also
+enables VPN routing when that platform runs in a workflow. Manual `openProfile`
+and `createProfile` launches enable routing when any platform requires it.
+The setting applies to the entire Brave session and all its tabs, not only the
+platform's notebook tab. Set up the VPN credentials under `[profile.vpn]` as below.
+
+VPN-enabled browsers run as your normal user inside their own Linux network
+namespace. WireGuard is the only external interface in its namespace; IPv4 and
+IPv6 destinations outside its configured routes are unreachable. DNS uses the
+WireGuard configuration's numeric DNS servers, with a public resolver fallback
+when none is specified. V2Ray uses a private bridge to Xray from a namespace
+containing only loopback. Direct connections, proxy bypasses, QUIC, and WebRTC
+cannot create an external route outside the configured VPN. A failed tunnel
+leaves the browser disconnected.
+
+The tunnel remains open for the browser's lifetime and is removed after the
+browser exits. Host routes and host DNS settings stay unchanged. Existing Brave
+instances using the same user-data root must be closed first, including other
+native profiles sharing that root, so Chromium cannot hand the window to a
+browser running outside the VPN. Linux, `ip`, `setpriv` (util-linux), and sudo
+permission to create network namespaces are required for browser VPN routing.
+Brave keeps its Chromium sandbox and is never run as root.
 
 `vpnCheck` accepts a profile directory name and tests an HTTPS request through
-that profile's VPN without opening Brave:
+that profile's VPN without opening Brave. This standalone diagnostic creates its
+own temporary probe tunnel; it does not launch or reconfigure a browser:
 
 ```bash
 python -m zepuppeteer vpnCheck acc-5
@@ -718,8 +779,10 @@ are rejected. Xray validates the generated configuration before starting.
 WireGuard needs Linux network namespaces, kernel WireGuard support, `wg`
 (wireguard-tools), and `ip` (iproute2). A normal user also needs `sudo` access.
 Terminal runs reuse cached authorization or show sudo's native password prompt
-before creating any network resources. You can also run `sudo -v` in the same
-terminal before retrying the command. Runs without a terminal never prompt and
+before creating any network resources. The preflight runs the read-only
+`sudo -n ip netns list`, so command-specific passwordless sudo access works even
+when `sudo -v` requires a password. You can also run `sudo ip netns list` in the
+same terminal before retrying the command. Runs without a terminal never prompt and
 need sudo authorization configured in advance. All subsequent privileged
 commands use `sudo -n`.
 Keys and peer endpoints are validated before sudo or network setup. Endpoint
@@ -991,3 +1054,80 @@ Useful references: [Playwright Python](https://playwright.dev/python/docs/librar
 [locators](https://playwright.dev/python/docs/locators),
 [tracing](https://playwright.dev/python/docs/api/class-tracing), and
 [Brave Linux installation](https://brave.com/linux/).
+
+## Command reference
+
+Run these commands from the repository root; replace placeholders such as
+`PROFILE`, `WORKFLOW`, and `RUN_ID` with your own values. After installation,
+`zepuppeteer` can replace `python -m zepuppeteer`; with uv, prefix Python commands
+with `uv run`.
+
+| Command | One-line explanation |
+| --- | --- |
+| `sudo apt-get update` | Refresh Ubuntu/Debian's native package index before installation. |
+| `sudo apt-get install -y curl ca-certificates wireguard-tools iproute2 util-linux procps` | Install HTTPS and WireGuard connectivity-check dependencies on Ubuntu/Debian. |
+| `sudo ip netns list` | Check sudo access to the network namespace command before retrying WireGuard connectivity checks. |
+| `python3 -m venv .venv` | Create a local Python virtual environment. |
+| `source .venv/bin/activate` | Activate the virtual environment in the current shell. |
+| `python -m pip install -e .` | Install the project and its dependencies in editable mode. |
+| `uv sync --locked` | Set up the project environment using the pinned dependencies in `uv.lock`. |
+| `python -m zepuppeteer --help` | Show the available application commands. |
+| `python -m zepuppeteer COMMAND --help` | Show the arguments accepted by a particular application command. |
+| `python -m zepuppeteer profiles` | List enabled profiles and their browser paths as JSON. |
+| `python -m zepuppeteer profiles --names` | Print only selected profile directory names, one per line. |
+| `python -m zepuppeteer profiles --include-disabled` | List profiles including those disabled in their metadata. |
+| `python -m zepuppeteer createProfile PROFILE` | Initialize or reopen a Brave profile for manual login, preserving existing configuration. |
+| `python -m zepuppeteer create-profile PROFILE` | Run the same profile initialization command using its alternate name. |
+| `python -m zepuppeteer createProfile PROFILE --dry-run` | Preview profile initialization without creating files or opening Brave. |
+| `python -m zepuppeteer openProfile PROFILE` | Open an existing account in regular Brave for manual login. |
+| `python -m zepuppeteer open-profile PROFILE` | Run the manual browser launcher using its alternate name. |
+| `python -m zepuppeteer openProfile PROFILE --dry-run` | Print the account's resolved native Brave command without opening it. |
+| `python -m zepuppeteer run --workflow WORKFLOW` | Run a named workflow or workflow TOML file across selected profiles. |
+| `python -m zepuppeteer run --workflow WORKFLOW --dry-run` | Validate and print the workflow plan without opening Brave or writing execution history. |
+| `python -m zepuppeteer run --workflow WORKFLOW --headless` | Execute the workflow without visible browser windows. |
+| `python -m zepuppeteer run --workflow demo --group demo` | Run the local demo workflow on the configured demo profile group. |
+| `python -m zepuppeteer run --workflow colab --profile PROFILE` | Run the configured Google Colab notebook workflow for one profile. |
+| `python -m zepuppeteer run --workflow kaggle --profile PROFILE` | Verify the configured Kaggle notebook's account, title, and running session. |
+| `python -m zepuppeteer vpnCheck PROFILE` | Check HTTPS connectivity through the profile's configured VPN without opening Brave. |
+| `python -m zepuppeteer vpnCheck PROFILE --timeout 20 --url https://1.1.1.1/cdn-cgi/trace` | Check VPN connectivity with an explicit timeout and HTTPS probe URL. |
+| `python -m zepuppeteer history` | Print recent workflow execution history as JSON. |
+| `python -m zepuppeteer history --limit 10` | Show at most ten recent workflow runs. |
+| `python -m zepuppeteer history --run-id RUN_ID` | Show profile and step results for a particular run. |
+| `python -m zepuppeteer history --state-db /path/to/runs.sqlite` | Read history from a specific SQLite database. |
+| `python -m zepuppeteer --profiles-dir ./profiles` | Open enabled profiles sequentially in legacy mode, advancing when each browser closes. |
+| `python -m zepuppeteer --profiles-dir ./profiles --dry-run` | Preview legacy profile discovery without opening or installing Brave. |
+| `python -m zepuppeteer --profiles-dir ./profiles --task ./examples/demo_task.py --headless` | Run the legacy single-file demo task on each enabled profile without visible windows. |
+| `python -m zepuppeteer --profiles-dir ./profiles --help` | Show the options supported by the legacy launcher. |
+| `python scripts/password_enc.py` | Prompt for a password and string key, then print an encrypted token. |
+| `python scripts/password_dec.py` | Prompt for an encrypted token and its original key, then print the decrypted password. |
+| `python scripts/import_brave_profile.py "Work account" PROFILE` | Move a named native Brave profile into the repository's managed profile storage. |
+| `python scripts/export_brave_profile.py "Work account" PROFILE` | Move a managed profile back into native Brave storage under the supplied display name. |
+| `python scripts/import_brave_profile.py --help` | Show import arguments and transfer options. |
+| `python scripts/export_brave_profile.py --help` | Show export arguments and transfer options. |
+| `python -m unittest discover -s tests -v` | Run the unit tests and any browser integration tests whose prerequisites are available. |
+
+Common options can be combined with the commands that support them:
+V
+| Option | One-line explanation |
+| --- | --- |
+| `--profiles-dir PATH` | Select the profile root for discovery, workflows, profile creation, manual opening, VPN checks, legacy launching, or transfers. |
+| `--layout auto`, `--layout isolated`, `--layout native` | Choose browser-data discovery layout for `profiles`, `run`, or the legacy launcher. |
+| `--config-dir PATH` | Select the group and workflow configuration directory for `profiles` or `run`. |
+| `--group NAME` | Select a named profile group for `profiles` or `run`. |
+| `--profile PROFILE` | Filter `profiles` or `run` by profile directory name; repeat to select multiple names. |
+| `--names` | Print only profile directory names for `profiles`, preserving the selected filters and order. |
+| `--tag TAG` | Require a profile tag for `profiles` or `run`; repeat to require multiple tags. |
+| `--executable PATH` | Choose the Brave executable for workflows, profile creation, manual opening, or legacy launching. |
+| `--no-install` | Fail if Brave is unavailable instead of installing it during workflows, profile creation, or legacy launching. |
+| `--headless` | Hide browser windows for workflows or legacy tasks; actual legacy execution requires `--task`. |
+| `--dry-run` | Preview workflows, profile creation, manual opening, legacy launching, or transfers without performing their changes. |
+| `--state-db PATH` | Choose the SQLite database used by `run` or read by `history`. |
+| `--artifacts-dir PATH` | Choose the task-output and failure-evidence root for `run`. |
+| `--no-trace` | Disable Playwright trace recording for `run`. |
+| `--brave-dir PATH` | Override native Brave's user-data root for import or export. |
+| `--copy` | Preserve the transfer source instead of moving it during import or export. |
+| `--replace` | Back up and replace an existing matching transfer destination during import or export. |
+
+Profile transfers **move data by default**; close Brave instances using either
+location before importing or exporting. Use `--dry-run` to preview a transfer
+and `--copy` when the source should remain in place.

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from ...config import read_toml
 from ...models import NeedsAttention, TaskContext, TaskResult
 from ...websites.colab import ColabSite, DEFAULT_NOTEBOOK_URL, validate_notebook_url
+from ...vpn import vpn_required
 
 
 async def check_login(page, expected_email: str, timeout=15) -> str:
@@ -37,7 +38,8 @@ async def check_login(page, expected_email: str, timeout=15) -> str:
     deadline = time.monotonic() + timeout
 
     while time.monotonic() < deadline:
-        # Google requires authentication.
+        # Google's sign-in page means logged out in every UI language; do not
+        # depend on translated text such as "Sign in" or "Use your Google Account".
         if urlsplit(page.url).hostname == "accounts.google.com":
             return "logged_out"
 
@@ -458,9 +460,35 @@ async def run(ctx: TaskContext) -> TaskResult:
         raise ValueError("Colab platform data requires email or login_username for the login check.")
     notebook_url = colabData.get("notebook_url")
 
+    # Verify the live tunnel used by this browser, rather than a temporary probe.
+    if vpn_required(ctx.profile, platforms={"colab"}):
+        print_state(ctx.profile.name, "Checking VPN connectivity", verbose=verbose)
+        route = getattr(ctx.browser, "_zepuppeteer_vpn_route", None)
+        if route is None:
+            raise NeedsAttention(
+                f"Profile '{ctx.profile.name}': VPN is required, but this browser was not launched through its VPN."
+            )
+        try:
+            await route.check_connection()
+        except (OSError, ValueError, RuntimeError) as error:
+            raise NeedsAttention(
+                f"Profile '{ctx.profile.name}': VPN connectivity check failed: {error}"
+            ) from error
+
     # Check login status
+    print_state(ctx.profile.name, "Checking login", verbose = verbose)
     page = await ctx.browser.new_page()
-    notebook = await ColabSite(page).open_notebook(notebook_url)
+    try:
+        notebook = await ColabSite(page).open_notebook(notebook_url)
+    except NeedsAttention as error:
+        # A Google sign-in redirect can stop notebook loading before check_login.
+        # The hostname identifies English and non-English login pages alike.
+        if urlsplit(page.url).hostname == "accounts.google.com":
+            raise NeedsAttention(
+                f"Profile '{ctx.profile.name}': Colab login check returned logged_out. "
+                "Sign in manually in this profile, then retry."
+            ) from error
+        raise
     if expected_email:
         loginStatus = await check_login(page, expected_email)
 
@@ -468,6 +496,7 @@ async def run(ctx: TaskContext) -> TaskResult:
             raise NeedsAttention(f"Profile '{ctx.profile.name}': Colab login check returned {loginStatus}.")
 
     # Check the notebook name configured in profile.toml.
+    print_state(ctx.profile.name, "Getting the notebook status", verbose = verbose)
     expected_notebook_name = colabData.get("notebook_name", None)
     if expected_notebook_name is not None:
         if not isinstance(expected_notebook_name, str) or not expected_notebook_name.strip():

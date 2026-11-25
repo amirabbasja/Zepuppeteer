@@ -10,6 +10,72 @@ from unittest.mock import patch
 from zepuppeteer import profile_transfer as transfer
 
 
+class StaleBrowserLockTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="zepuppeteer-stale-lock-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.data = self.root / "browser"
+        self.data.mkdir()
+        self.socket_dir = self.root / "old-host-tmp"
+        self.targets = {
+            "SingletonLock": "previous-studio-96984",
+            "SingletonSocket": str(self.socket_dir / "SingletonSocket"),
+            "SingletonCookie": "123456789",
+        }
+        for name, target in self.targets.items():
+            (self.data / name).symlink_to(target)
+        self.enterContext(patch.object(transfer.socket, "gethostname", return_value="current-studio"))
+        self.no_browser = self.enterContext(patch.object(transfer, "_no_local_browser", return_value=True))
+
+    def assert_untouched(self):
+        for name, target in self.targets.items():
+            self.assertEqual(os.readlink(self.data / name), target)
+        self.assertFalse(list(self.data.glob("SingletonLocks.backup-*")))
+
+    def test_previous_studio_locks_are_backed_up_and_repeated_recovery_is_noop(self):
+        (self.data / "Cookies").write_bytes(b"saved login")
+        transfer.recover_stale_browser_locks(self.data)
+        transfer.ensure_closed(self.data)
+        backup, = self.data.glob("SingletonLocks.backup-*")
+        for name, target in self.targets.items():
+            self.assertFalse((self.data / name).is_symlink())
+            self.assertEqual(os.readlink(backup / name), target)
+        transfer.recover_stale_browser_locks(self.data)
+        self.assertEqual(list(self.data.glob("SingletonLocks.backup-*")), [backup])
+        self.assertEqual((self.data / "Cookies").read_bytes(), b"saved login")
+
+    def test_running_browser_or_unreadable_process_inventory_prevents_recovery(self):
+        self.no_browser.return_value = False
+        transfer.recover_stale_browser_locks(self.data)
+        self.assert_untouched()
+
+    def test_existing_socket_directory_prevents_recovery(self):
+        self.socket_dir.mkdir()
+        transfer.recover_stale_browser_locks(self.data)
+        self.assert_untouched()
+
+    def test_same_host_and_malformed_locks_are_not_recovered(self):
+        lock = self.data / "SingletonLock"
+        for target in (f"current-studio-{os.getpid()}", "unknown", "previous-studio-0"):
+            lock.unlink()
+            lock.symlink_to(target)
+            transfer.recover_stale_browser_locks(self.data)
+            self.assertEqual(os.readlink(lock), target)
+            self.assertFalse(list(self.data.glob("SingletonLocks.backup-*")))
+
+    def test_changed_lock_is_not_moved(self):
+        def browser_started():
+            lock = self.data / "SingletonLock"
+            lock.unlink()
+            lock.symlink_to("current-studio-12345")
+            return True
+        self.no_browser.side_effect = browser_started
+        transfer.recover_stale_browser_locks(self.data)
+        self.assertEqual(os.readlink(self.data / "SingletonLock"), "current-studio-12345")
+        self.assertFalse(list(self.data.glob("SingletonLocks.backup-*")))
+
+
 class TransferTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="zepuppeteer-transfer-test-")
